@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: feedscan
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: .
+    binary: feedscan
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    ignore:
+      - goarch: arm
+        goos: windows
+      - goarch: arm64
+        goos: windows
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- tolower .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true
+
+release:
+  mode: keep-existing
+
+brews:
+  - repository:
+      owner: meysam81
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/meysam81/feedscan
+    description: Find active RSS/Atom feeds linked from any web page.
+    license: Apache-2.0
+    commit_author:
+      name: "{{ .Env.GITHUB_ACTOR }}"
+      email: "{{ .Env.GITHUB_ACTOR_ID }}+{{ .Env.GITHUB_ACTOR }}@users.noreply.github.com"
+    test: |
+      assert_match "feedscan", shell_output("#{bin}/feedscan -version")

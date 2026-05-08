@@ -37,6 +37,14 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
+// Build metadata, populated by goreleaser via -ldflags. Defaults are useful for
+// local `go build` so the binary still reports something sensible.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // Status describes the outcome of probing a single external URL.
 type Status string
 
@@ -89,6 +97,7 @@ type Config struct {
 	SortBy         string // url|status|latest_post|item_count|checked_at
 	SortOrder      string // asc|desc
 	Format         string // "json" or "table"
+	PrintVersion   bool
 }
 
 func main() {
@@ -101,6 +110,11 @@ func mainErr() error {
 	cfg, err := parseFlags()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+
+	if cfg.PrintVersion {
+		fmt.Printf("feedscan %s (commit %s, built %s)\n", version, commit, date)
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,8 +146,12 @@ func parseFlags() (*Config, error) {
 	flag.StringVar(&cfg.SortBy, "sort-by", "latest_post", "sort field: url|status|latest_post|item_count|checked_at")
 	flag.StringVar(&cfg.SortOrder, "sort-order", "desc", "sort order: asc|desc")
 	flag.StringVar(&cfg.Format, "format", "json", "output format: json|table")
+	flag.BoolVar(&cfg.PrintVersion, "version", false, "print version and exit")
 	flag.Parse()
 
+	if cfg.PrintVersion {
+		return cfg, nil
+	}
 	if cfg.InputURL == "" {
 		flag.Usage()
 		return nil, errors.New("-url is required")
@@ -239,7 +257,10 @@ func run(ctx context.Context, cfg *Config) error {
 		out[i] = applyFreshness(out[i], cutoff)
 	}
 	sortResults(out, cfg.SortBy, cfg.SortOrder)
-	return emit(cfg.Format, out)
+	if cfg.Verbose {
+		return emit(cfg.Format, out)
+	}
+	return emitProbeSummary(cfg.Format, out)
 }
 
 // ─── HTTP client ─────────────────────────────────────────────────────────────
@@ -881,6 +902,64 @@ func summarizeDryRun(urls []string) DryRunSummary {
 		TotalURLs:     len(urls),
 		UniqueDomains: len(counts),
 		TopDomains:    top,
+	}
+}
+
+// ProbeSummary aggregates probe results by status and returns the top N entries
+// according to whatever order the caller already sorted by.
+type ProbeSummary struct {
+	Total       int            `json:"total"`
+	StatusCount map[Status]int `json:"status_count"`
+	TopResults  []Result       `json:"top_results"`
+}
+
+const probeTopN = 3
+
+// summarizeProbe builds a status breakdown and takes the first N entries from
+// the already-sorted results slice as "top results".
+func summarizeProbe(results []Result) ProbeSummary {
+	counts := make(map[Status]int)
+	for _, r := range results {
+		counts[r.Status]++
+	}
+	top := results
+	if len(top) > probeTopN {
+		top = top[:probeTopN]
+	}
+	return ProbeSummary{
+		Total:       len(results),
+		StatusCount: counts,
+		TopResults:  top,
+	}
+}
+
+// emitProbeSummary prints the aggregated probe summary in the chosen format.
+func emitProbeSummary(format string, results []Result) error {
+	s := summarizeProbe(results)
+	switch format {
+	case "table":
+		fmt.Printf("Total results: %d\n", s.Total)
+		if len(s.StatusCount) > 0 {
+			fmt.Println("\nBy status:")
+			// Stable order: active, stale, no_feed, error, then anything else.
+			for _, st := range []Status{StatusActive, StatusStale, StatusNoFeed, StatusError} {
+				if n, ok := s.StatusCount[st]; ok {
+					fmt.Printf("  %-8s %d\n", st, n)
+				}
+			}
+		}
+		if len(s.TopResults) > 0 {
+			fmt.Printf("\nTop %d results:\n", len(s.TopResults))
+			return emitTable(s.TopResults)
+		}
+		fmt.Fprintln(os.Stderr, "\n(use -verbose to print all results)")
+		return nil
+	case "json", "":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(s)
+	default:
+		return fmt.Errorf("unknown format: %s", format)
 	}
 }
 
