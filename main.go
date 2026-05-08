@@ -41,21 +41,21 @@ import (
 type Status string
 
 const (
-	StatusActive Status = "active"   // feed found, fresh entry within window
-	StatusStale  Status = "stale"    // feed found, no fresh entry within window
-	StatusNoFeed Status = "no_feed"  // probed all candidates, no feed found
-	StatusError  Status = "error"    // network or parse error
+	StatusActive Status = "active"  // feed found, fresh entry within window
+	StatusStale  Status = "stale"   // feed found, no fresh entry within window
+	StatusNoFeed Status = "no_feed" // probed all candidates, no feed found
+	StatusError  Status = "error"   // network or parse error
 )
 
 // Result is the per-URL outcome, also used as the checkpoint cache value.
 type Result struct {
-	URL         string    `json:"url"`
-	Status      Status    `json:"status"`
-	FeedURL     string    `json:"feed_url,omitempty"`
-	LatestPost  time.Time `json:"latest_post,omitempty"`
-	ItemCount   int       `json:"item_count,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	CheckedAt   time.Time `json:"checked_at"`
+	URL        string    `json:"url"`
+	Status     Status    `json:"status"`
+	FeedURL    string    `json:"feed_url,omitempty"`
+	LatestPost time.Time `json:"latest_post,omitempty"`
+	ItemCount  int       `json:"item_count,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CheckedAt  time.Time `json:"checked_at"`
 }
 
 // Config holds all tunables. Defaults are set in parseFlags.
