@@ -1,6 +1,6 @@
 module feedscan
 
-go 1.22
+go 1.26.2
 
 require (
 	github.com/mmcdole/gofeed v1.3.0
