@@ -48,14 +48,26 @@ const (
 )
 
 // Result is the per-URL outcome, also used as the checkpoint cache value.
+//
+// Time fields are pointers so encoding/json's `omitempty` correctly drops them
+// when zero — `time.Time{}` is a struct and would otherwise serialize as
+// "0001-01-01T00:00:00Z".
 type Result struct {
-	URL        string    `json:"url"`
-	Status     Status    `json:"status"`
-	FeedURL    string    `json:"feed_url,omitempty"`
-	LatestPost time.Time `json:"latest_post,omitempty"`
-	ItemCount  int       `json:"item_count,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CheckedAt  time.Time `json:"checked_at"`
+	URL        string     `json:"url"`
+	Status     Status     `json:"status,omitempty"`
+	FeedURL    string     `json:"feed_url,omitempty"`
+	LatestPost *time.Time `json:"latest_post,omitempty"`
+	ItemCount  int        `json:"item_count,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	CheckedAt  *time.Time `json:"checked_at,omitempty"`
+}
+
+// timePtr returns nil for zero times so they serialize as omitted JSON fields.
+func timePtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // Config holds all tunables. Defaults are set in parseFlags.
@@ -72,21 +84,32 @@ type Config struct {
 	HostDelay      time.Duration
 	DryRun         bool
 	NoCache        bool
+	Verbose        bool
+	MaxURLs        int    // cap on URLs to process; 0 = unlimited
+	SortBy         string // url|status|latest_post|item_count|checked_at
+	SortOrder      string // asc|desc
 	Format         string // "json" or "table"
 }
 
 func main() {
+	if err := mainErr(); err != nil {
+		log.Fatalf("%v", err)
+	}
+}
+
+func mainErr() error {
 	cfg, err := parseFlags()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		return fmt.Errorf("config: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := run(ctx, cfg); err != nil {
-		log.Fatalf("run: %v", err)
+		return fmt.Errorf("run: %w", err)
 	}
+	return nil
 }
 
 func parseFlags() (*Config, error) {
@@ -104,12 +127,20 @@ func parseFlags() (*Config, error) {
 	flag.DurationVar(&cfg.HostDelay, "host-delay", 500*time.Millisecond, "min delay between requests to same host")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "extract URLs but skip feed probing")
 	flag.BoolVar(&cfg.NoCache, "no-cache", false, "ignore checkpoint cache")
+	flag.BoolVar(&cfg.Verbose, "verbose", false, "print all URLs in dry-run mode (default: aggregated summary)")
+	flag.IntVar(&cfg.MaxURLs, "max-urls", 0, "cap on extracted URLs to process (0 = unlimited); useful for trying small batches")
+	flag.StringVar(&cfg.SortBy, "sort-by", "latest_post", "sort field: url|status|latest_post|item_count|checked_at")
+	flag.StringVar(&cfg.SortOrder, "sort-order", "desc", "sort order: asc|desc")
 	flag.StringVar(&cfg.Format, "format", "json", "output format: json|table")
 	flag.Parse()
 
 	if cfg.InputURL == "" {
 		flag.Usage()
 		return nil, errors.New("-url is required")
+	}
+	// Default to https if the user passed a bare host like "example.com".
+	if !strings.Contains(cfg.InputURL, "://") {
+		cfg.InputURL = "https://" + cfg.InputURL
 	}
 	if cfg.Concurrency < 1 {
 		return nil, errors.New("-concurrency must be >= 1")
@@ -119,6 +150,15 @@ func parseFlags() (*Config, error) {
 	}
 	if cfg.WindowDays < 1 {
 		return nil, errors.New("-days must be >= 1")
+	}
+	if cfg.MaxURLs < 0 {
+		return nil, errors.New("-max-urls must be >= 0")
+	}
+	if _, ok := sortLessFns[cfg.SortBy]; !ok {
+		return nil, fmt.Errorf("-sort-by must be one of: url, status, latest_post, item_count, checked_at (got %q)", cfg.SortBy)
+	}
+	if cfg.SortOrder != "asc" && cfg.SortOrder != "desc" {
+		return nil, fmt.Errorf("-sort-order must be asc or desc (got %q)", cfg.SortOrder)
 	}
 	if !filepath.IsAbs(cfg.CheckpointPath) {
 		abs, err := filepath.Abs(cfg.CheckpointPath)
@@ -139,9 +179,19 @@ func run(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("extract: %w", err)
 	}
 
+	// Optional cap so users can validate behavior on a small batch before
+	// committing to a full run.
+	if cfg.MaxURLs > 0 && len(urls) > cfg.MaxURLs {
+		fmt.Fprintf(os.Stderr, "capping to %d URLs (of %d extracted; -max-urls)\n", cfg.MaxURLs, len(urls))
+		urls = urls[:cfg.MaxURLs]
+	}
+
 	if cfg.DryRun {
 		fmt.Fprintf(os.Stderr, "found %d external URLs (dry run; remove -dry-run to probe feeds)\n", len(urls))
-		return emit(cfg.Format, urlsAsResults(urls))
+		if cfg.Verbose {
+			return emit(cfg.Format, urlsAsResults(urls))
+		}
+		return emitDryRunSummary(cfg.Format, urls)
 	}
 
 	// Step 2: load checkpoint, filter URLs needing fresh probes.
@@ -188,6 +238,7 @@ func run(ctx context.Context, cfg *Config) error {
 	for i := range out {
 		out[i] = applyFreshness(out[i], cutoff)
 	}
+	sortResults(out, cfg.SortBy, cfg.SortOrder)
 	return emit(cfg.Format, out)
 }
 
@@ -216,26 +267,42 @@ func newHTTPClient(cfg *Config) *http.Client {
 	}
 }
 
+// fetchResult is what callers actually need from fetch — status, content type,
+// and body. The HTTP response body is read and closed inside fetch.
+type fetchResult struct {
+	StatusCode  int
+	ContentType string
+	Body        []byte
+}
+
 // fetch performs a GET with the configured UA and returns the body, capped at
-// MaxBodyBytes. Caller must close the returned body.
-func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string) (*http.Response, []byte, error) {
+// MaxBodyBytes.
+func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string) (*fetchResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", cfg.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml,application/rss+xml,application/atom+xml;q=0.9,*/*;q=0.8")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Printf("warning: response body close (%s): %v", rawURL, cerr)
+		}
+	}()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxBodyBytes))
-	resp.Body.Close()
 	if err != nil {
-		return resp, nil, err
+		return nil, err
 	}
-	return resp, body, nil
+	return &fetchResult{
+		StatusCode:  resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Body:        body,
+	}, nil
 }
 
 // ─── URL extraction ──────────────────────────────────────────────────────────
@@ -252,15 +319,15 @@ func extractExternalURLs(ctx context.Context, client *http.Client, cfg *Config) 
 		return nil, fmt.Errorf("registrable domain: %w", err)
 	}
 
-	resp, body, err := fetch(ctx, client, cfg, cfg.InputURL)
+	res, err := fetch(ctx, client, cfg, cfg.InputURL)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("input URL returned %d", resp.StatusCode)
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("input URL returned %d", res.StatusCode)
 	}
 
-	doc, err := html.Parse(strings.NewReader(string(body)))
+	doc, err := html.Parse(strings.NewReader(string(res.Body)))
 	if err != nil {
 		return nil, fmt.Errorf("parse HTML: %w", err)
 	}
@@ -347,10 +414,7 @@ func probeAll(ctx context.Context, client *http.Client, cfg *Config, todo []stri
 	var mu sync.Mutex
 
 	for start := 0; start < len(todo); start += cfg.BatchSize {
-		end := start + cfg.BatchSize
-		if end > len(todo) {
-			end = len(todo)
-		}
+		end := min(start+cfg.BatchSize, len(todo))
 		batch := todo[start:end]
 
 		sem := make(chan struct{}, cfg.Concurrency)
@@ -381,7 +445,8 @@ func probeAll(ctx context.Context, client *http.Client, cfg *Config, todo []stri
 
 // probeOne discovers a feed for target and evaluates the latest post.
 func probeOne(ctx context.Context, client *http.Client, parser *gofeed.Parser, cfg *Config, target string, hg *hostGate) Result {
-	r := Result{URL: target, CheckedAt: time.Now()}
+	now := time.Now()
+	r := Result{URL: target, CheckedAt: &now}
 
 	feedURL, feedBody, err := discoverFeed(ctx, client, cfg, target, hg)
 	if err != nil {
@@ -403,7 +468,7 @@ func probeOne(ctx context.Context, client *http.Client, parser *gofeed.Parser, c
 	}
 
 	r.ItemCount = len(feed.Items)
-	r.LatestPost = latestItemDate(feed)
+	r.LatestPost = timePtr(latestItemDate(feed))
 	// Status (active/stale) is set by applyFreshness after we know the cutoff.
 	r.Status = StatusStale
 	return r
@@ -413,14 +478,15 @@ func probeOne(ctx context.Context, client *http.Client, parser *gofeed.Parser, c
 // list of common paths. Returns the feed URL and raw bytes on success.
 func discoverFeed(ctx context.Context, client *http.Client, cfg *Config, target string, hg *hostGate) (string, []byte, error) {
 	hg.wait(target)
-	resp, body, err := fetch(ctx, client, cfg, target)
+	res, err := fetch(ctx, client, cfg, target)
 	if err != nil {
 		return "", nil, fmt.Errorf("fetch homepage: %w", err)
 	}
-	if resp.StatusCode >= 400 {
-		// Don't give up — we can still try fallback paths.
-		body = nil
+	var body []byte
+	if res.StatusCode < 400 {
+		body = res.Body
 	}
+	// Don't give up on >=400 — we can still try fallback paths.
 
 	candidates := feedLinksFromHTML(target, body)
 	candidates = append(candidates, fallbackPathsFor(target)...)
@@ -432,15 +498,15 @@ func discoverFeed(ctx context.Context, client *http.Client, cfg *Config, target 
 		default:
 		}
 		hg.wait(c)
-		fr, fb, err := fetch(ctx, client, cfg, c)
+		fr, err := fetch(ctx, client, cfg, c)
 		if err != nil {
 			continue
 		}
-		if fr.StatusCode >= 400 || len(fb) == 0 {
+		if fr.StatusCode >= 400 || len(fr.Body) == 0 {
 			continue
 		}
-		if looksLikeFeed(fb, fr.Header.Get("Content-Type")) {
-			return c, fb, nil
+		if looksLikeFeed(fr.Body, fr.ContentType) {
+			return c, fr.Body, nil
 		}
 	}
 	return "", nil, nil
@@ -546,7 +612,7 @@ func applyFreshness(r Result, cutoff time.Time) Result {
 	if r.Status != StatusStale && r.Status != StatusActive {
 		return r
 	}
-	if !r.LatestPost.IsZero() && r.LatestPost.After(cutoff) {
+	if r.LatestPost != nil && r.LatestPost.After(cutoff) {
 		r.Status = StatusActive
 	} else {
 		r.Status = StatusStale
@@ -611,7 +677,11 @@ func loadCheckpoint(path string) (*checkpoint, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("warning: checkpoint file close: %v", cerr)
+		}
+	}()
 	if err := json.NewDecoder(f).Decode(cp); err != nil {
 		// Corrupt checkpoint shouldn't crash the run; start fresh.
 		log.Printf("warning: checkpoint unreadable (%v); starting fresh", err)
@@ -630,7 +700,7 @@ func (c *checkpoint) get(u string, now time.Time, ttl time.Duration) (Result, bo
 	if !ok {
 		return Result{}, false
 	}
-	if now.Sub(r.CheckedAt) > ttl {
+	if r.CheckedAt == nil || now.Sub(*r.CheckedAt) > ttl {
 		return Result{}, false
 	}
 	return r, true
@@ -658,12 +728,18 @@ func (c *checkpoint) save(path string) error {
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(c); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		if cerr := tmp.Close(); cerr != nil {
+			log.Printf("warning: checkpoint temp close after encode error: %v", cerr)
+		}
+		if rerr := os.Remove(tmp.Name()); rerr != nil {
+			log.Printf("warning: checkpoint temp remove after encode error: %v", rerr)
+		}
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		if rerr := os.Remove(tmp.Name()); rerr != nil {
+			log.Printf("warning: checkpoint temp remove after close error: %v", rerr)
+		}
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
@@ -693,7 +769,7 @@ func emitTable(results []Result) error {
 	fmt.Println(strings.Repeat("-", 130))
 	for _, r := range results {
 		latest := ""
-		if !r.LatestPost.IsZero() {
+		if r.LatestPost != nil {
 			latest = r.LatestPost.Format(time.RFC3339)
 		}
 		fmt.Printf("%-60s  %-10s  %-25s  %s\n", truncate(r.URL, 60), r.Status, latest, r.FeedURL)
@@ -708,6 +784,43 @@ func truncate(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+// ─── Sorting ─────────────────────────────────────────────────────────────────
+
+// sortLessFns is the registry of supported -sort-by fields. Each function
+// returns true when a should sort before b in ascending order; descending is
+// applied by swapping arguments at the call site.
+//
+// Nil time pointers are treated as the zero value so they consistently land at
+// the "oldest" end regardless of order direction.
+var sortLessFns = map[string]func(a, b Result) bool{
+	"url":         func(a, b Result) bool { return a.URL < b.URL },
+	"status":      func(a, b Result) bool { return string(a.Status) < string(b.Status) },
+	"item_count":  func(a, b Result) bool { return a.ItemCount < b.ItemCount },
+	"latest_post": func(a, b Result) bool { return derefTime(a.LatestPost).Before(derefTime(b.LatestPost)) },
+	"checked_at":  func(a, b Result) bool { return derefTime(a.CheckedAt).Before(derefTime(b.CheckedAt)) },
+}
+
+func derefTime(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
+}
+
+// sortResults sorts in place. Stable so equal keys preserve input order.
+func sortResults(results []Result, by, order string) {
+	less, ok := sortLessFns[by]
+	if !ok {
+		return
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if order == "asc" {
+			return less(results[i], results[j])
+		}
+		return less(results[j], results[i])
+	})
+}
+
 // urlsAsResults wraps a list of URLs as bare Result entries for dry-run output.
 func urlsAsResults(urls []string) []Result {
 	out := make([]Result, len(urls))
@@ -715,4 +828,82 @@ func urlsAsResults(urls []string) []Result {
 		out[i] = Result{URL: u}
 	}
 	return out
+}
+
+// ─── Dry-run summary ─────────────────────────────────────────────────────────
+
+// DomainCount is one entry in the top-N domain breakdown.
+type DomainCount struct {
+	Domain string `json:"domain"`
+	Count  int    `json:"count"`
+}
+
+// DryRunSummary aggregates extracted URLs by registrable domain so non-verbose
+// dry-run output shows shape, not noise.
+type DryRunSummary struct {
+	TotalURLs     int           `json:"total_urls"`
+	UniqueDomains int           `json:"unique_domains"`
+	TopDomains    []DomainCount `json:"top_domains"`
+}
+
+// dryRunTopN caps how many top domains the summary prints.
+const dryRunTopN = 3
+
+// summarizeDryRun groups urls by registrable domain and returns a top-N summary.
+func summarizeDryRun(urls []string) DryRunSummary {
+	counts := make(map[string]int)
+	for _, u := range urls {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			continue
+		}
+		dom, err := registrableDomain(parsed.Hostname())
+		if err != nil {
+			continue
+		}
+		counts[dom]++
+	}
+	domains := make([]DomainCount, 0, len(counts))
+	for d, c := range counts {
+		domains = append(domains, DomainCount{Domain: d, Count: c})
+	}
+	sort.Slice(domains, func(i, j int) bool {
+		if domains[i].Count != domains[j].Count {
+			return domains[i].Count > domains[j].Count
+		}
+		return domains[i].Domain < domains[j].Domain
+	})
+	top := domains
+	if len(top) > dryRunTopN {
+		top = top[:dryRunTopN]
+	}
+	return DryRunSummary{
+		TotalURLs:     len(urls),
+		UniqueDomains: len(counts),
+		TopDomains:    top,
+	}
+}
+
+// emitDryRunSummary prints the aggregated dry-run summary in the chosen format.
+func emitDryRunSummary(format string, urls []string) error {
+	s := summarizeDryRun(urls)
+	switch format {
+	case "table":
+		fmt.Printf("Total URLs:     %d\n", s.TotalURLs)
+		fmt.Printf("Unique domains: %d\n", s.UniqueDomains)
+		if len(s.TopDomains) > 0 {
+			fmt.Printf("\nTop %d domains:\n", len(s.TopDomains))
+			for _, d := range s.TopDomains {
+				fmt.Printf("  %5d  %s\n", d.Count, d.Domain)
+			}
+		}
+		fmt.Fprintln(os.Stderr, "\n(use -verbose to print all URLs)")
+		return nil
+	case "json", "":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(s)
+	default:
+		return fmt.Errorf("unknown format: %s", format)
+	}
 }
