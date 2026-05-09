@@ -3,6 +3,10 @@ version: 2
 
 project_name: feedscan
 
+env:
+  - GITHUB_TOKEN
+  - HOMEBREW_TAP_GITHUB_TOKEN
+
 before:
   hooks:
     - go mod tidy
@@ -53,16 +57,29 @@ changelog:
 release:
   mode: keep-existing
 
-brews:
-  - repository:
-      owner: meysam81
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/meysam81/feedscan
+homebrew_casks:
+  - name: feedscan
     description: Find active RSS/Atom feeds linked from any web page.
+    homepage: https://github.com/meysam81/feedscan
     license: Apache-2.0
+    commit_msg_template: Brew formula update for {{ .ProjectName }} version {{ .Tag }}
     commit_author:
       name: "{{ .Env.GITHUB_ACTOR }}"
       email: "{{ .Env.GITHUB_ACTOR_ID }}+{{ .Env.GITHUB_ACTOR }}@users.noreply.github.com"
-    test: |
-      assert_match "feedscan", shell_output("#{bin}/feedscan -version")
+    repository:
+      name: homebrew-tap
+      owner: meysam81
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/feedscan"]
+          end
+          puts "feedscan installed successfully."
+          puts ""
+          puts "Quick start:"
+          puts "   feedscan -url example.com"
+          puts ""
+          puts "Documentation:"
+          puts "   https://github.com/meysam81/feedscan"
