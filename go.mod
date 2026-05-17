@@ -3,8 +3,11 @@ module feedscan
 go 1.26.2
 
 require (
+	github.com/goccy/go-json v0.10.6
 	github.com/mmcdole/gofeed v1.3.0
+	github.com/urfave/cli/v3 v3.9.0
 	golang.org/x/net v0.30.0
+	golang.org/x/sys v0.44.0
 )
 
 require (

@@ -59,69 +59,103 @@ go build -o feedscan .
 ## Usage
 
 ```sh
-feedscan -url https://example.com/blog
+feedscan scan --url https://example.com/blog
+# or just (scan is the default subcommand):
+feedscan --url example.com
 ```
 
-Common flags:
+Common flags for `scan`:
 
 ```
--url           input URL to scan (required; bare hosts get https:// prepended)
--days          freshness window in days (default 7)
--timeout       per-request HTTP timeout (default 10s)
--concurrency   max concurrent workers (default 8)
--batch         URLs per batch (default 32)
--cache-ttl     checkpoint TTL (default 24h)
--checkpoint    checkpoint file path (default ./feedscan.checkpoint.json)
--dry-run       extract URLs but skip feed probing
--no-cache      ignore checkpoint cache
--verbose       print full result list (default: aggregated summary + top 3)
--max-urls      cap on extracted URLs to process (0 = unlimited)
--sort-by       sort field: url|status|latest_post|item_count|checked_at (default latest_post)
--sort-order    sort order: asc|desc (default desc)
--format        output format: json|table (default json)
--user-agent    HTTP User-Agent (default feedscan/1.0)
--host-delay    min delay between requests to same host (default 500ms)
--max-body      max response body bytes (default 10MB)
--version       print version and exit
+--url           input URL to scan (required; bare hosts get https:// prepended)
+--days          freshness window in days (default 7)
+--timeout       per-request HTTP timeout (default 10s)
+--concurrency   max concurrent workers (default 8)
+--batch         URLs per batch (default 32)
+--cache-ttl     checkpoint TTL (default 24h)
+--checkpoint    checkpoint file path (default ./feedscan.checkpoint.json)
+--dry-run       extract URLs but skip feed probing
+--no-cache      ignore checkpoint cache
+--verbose       print full result list (default: aggregated summary + top 3)
+--max-urls      cap on extracted URLs to process (0 = unlimited)
+--sort-by       sort field: url|status|latest_post|item_count|checked_at (default latest_post)
+--sort-order    sort order: asc|desc (default desc)
+--format        output format: json|table (default json)
+--user-agent    HTTP User-Agent (default feedscan/1.0)
+--host-delay    min delay between requests to same host (default 500ms)
+--max-body      max response body bytes (default 10MB)
+--version       print version and exit
 ```
+
+Every flag has a `FEEDSCAN_*` env-var equivalent (e.g. `FEEDSCAN_URL`, `FEEDSCAN_CHECKPOINT`).
 
 ### Examples
 
 Aggregated summary (default — total + breakdown by status + top 3 results):
 
 ```sh
-feedscan -url example.com
+feedscan --url example.com
 ```
 
 Verbose output — every probed URL:
 
 ```sh
-feedscan -url example.com -verbose
+feedscan --url example.com --verbose
 ```
 
 Try a small batch first:
 
 ```sh
-feedscan -url example.com -max-urls 10
+feedscan --url example.com --max-urls 10
 ```
 
 Dry run — list external URLs without probing feeds:
 
 ```sh
-feedscan -url example.com -dry-run
+feedscan --url example.com --dry-run
 ```
 
 30-day window with higher concurrency, table output:
 
 ```sh
-feedscan -url example.com -days 30 -concurrency 16 -format table -verbose
+feedscan --url example.com --days 30 --concurrency 16 --format table --verbose
 ```
 
 Force a fresh scan, ignoring cached results:
 
 ```sh
-feedscan -url example.com -no-cache
+feedscan --url example.com --no-cache
 ```
+
+## Reading cursor
+
+Track which scanned URLs you've personally visited. Each checkpoint file stores a per-URL `visited_at` timestamp; subcommands operate on that state.
+
+```sh
+# List the top 20 unvisited URLs sorted by latest_post desc:
+feedscan cursor --checkpoint 512.club.checkpoint.json unread
+
+# Same, but only the top 5:
+feedscan cursor --checkpoint 512.club.checkpoint.json unread -n 5
+
+# Mark a URL as visited (sets visited_at = now, UTC):
+feedscan cursor --checkpoint 512.club.checkpoint.json mark https://example.com
+
+# Clear the mark:
+feedscan cursor --checkpoint 512.club.checkpoint.json unmark https://example.com
+
+# Show what you've read, most recent first:
+feedscan cursor --checkpoint 512.club.checkpoint.json history
+
+# Totals + by-status breakdown:
+feedscan cursor --checkpoint 512.club.checkpoint.json stats
+```
+
+All cursor commands honor `--format json|table` (default `table`) and the `FEEDSCAN_CHECKPOINT`/`FEEDSCAN_FORMAT` env vars.
+
+Mutating commands (`mark`/`unmark`) acquire an advisory file lock (`<checkpoint>.lock`) so concurrent invocations from multiple terminals can't lose updates.
+
+Re-running `scan` preserves your reading state — `visited_at` is never overwritten by probing.
 
 ### Output
 
@@ -134,10 +168,30 @@ Each result has one of four statuses:
 
 ## Notes
 
-- Checkpoints are keyed per external URL and persist after each probe, so an interrupted run resumes without re-fetching.
+- Checkpoints are keyed per external URL and persisted once per batch, so an interrupted run resumes without re-fetching whole batches.
 - "External" means a different registrable domain (eTLD+1) than the input URL.
 - TLS 1.2 minimum. HTTPS-only.
 - Feed discovery: HTML `<link rel="alternate">` first, then a fallback list of common paths (`/feed`, `/rss`, `/atom.xml`, etc.).
+
+### Checkpoint file shape
+
+```json
+{
+  "entries": {
+    "https://example.com": {
+      "url": "https://example.com",
+      "status": "active",
+      "feed_url": "https://example.com/feed",
+      "latest_post": "2026-05-08T15:54:49Z",
+      "item_count": 12,
+      "checked_at": "2026-05-17T05:00:00Z",
+      "visited_at": "2026-05-17T05:28:09Z"
+    }
+  }
+}
+```
+
+`visited_at` is only set when you run `feedscan cursor mark`; it's UTC RFC3339.
 
 ## License
 

@@ -117,6 +117,10 @@ linters:
           deny:
             - pkg: "github.com/rs/zerolog/log"
               desc: "Use dependency injection (*logger.Logger) instead of global zerolog logger. Only internal/logger may import this."
+        no-stdlib-json:
+          deny:
+            - pkg: "encoding/json"
+              desc: "Use github.com/goccy/go-json (aliased as json) for performance + consistency with other repos."
 
     errcheck:
       check-type-assertions: true
