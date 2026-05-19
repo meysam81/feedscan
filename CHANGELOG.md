@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.0](https://github.com/meysam81/feedscan/compare/v0.0.2...v0.1.0) (2026-05-19)
+
+
+### Features
+
+* add cursor and move the logic to internal ([998d063](https://github.com/meysam81/feedscan/commit/998d06381b846593ae75493fc204b93c520cfb4b))
+
+
+### Bug Fixes
+
+* do not track checkpoint files ([449b1af](https://github.com/meysam81/feedscan/commit/449b1afc21d1831172a9a91adc665e0631411eae))
+
 ## [0.0.2](https://github.com/meysam81/feedscan/compare/v0.0.1...v0.0.2) (2026-05-09)
 
 
