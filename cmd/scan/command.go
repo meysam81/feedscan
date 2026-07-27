@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,7 +82,7 @@ func Command() *cli.Command {
 				Sources:     cli.EnvVars("FEEDSCAN_CACHE_TTL"),
 				Destination: &cfg.CacheTTL,
 			},
-			cliflags.CheckpointFlag(&cfg.CheckpointPath, false, "feedscan.checkpoint.json"),
+			cliflags.CheckpointFlag(&cfg.CheckpointPath, false, ""),
 			&cli.StringFlag{
 				Name:        "user-agent",
 				Usage:       "HTTP User-Agent",
@@ -169,6 +170,9 @@ func normalize(c *scanner.Config, _ *presentation) error {
 	if c.InputURL != "" && !strings.Contains(c.InputURL, "://") {
 		c.InputURL = "https://" + c.InputURL
 	}
+	if c.CheckpointPath == "" {
+		c.CheckpointPath = defaultCheckpointPath(c.InputURL)
+	}
 	if !filepath.IsAbs(c.CheckpointPath) {
 		abs, err := filepath.Abs(c.CheckpointPath)
 		if err != nil {
@@ -177,6 +181,21 @@ func normalize(c *scanner.Config, _ *presentation) error {
 		c.CheckpointPath = abs
 	}
 	return nil
+}
+
+// defaultCheckpointPath derives "{domain}.checkpoint.json" from the input URL,
+// falling back to a fixed name when the domain can't be determined.
+func defaultCheckpointPath(inputURL string) string {
+	fallback := "feedscan.checkpoint.json"
+	u, err := url.Parse(inputURL)
+	if err != nil || u.Hostname() == "" {
+		return fallback
+	}
+	domain, err := publicsuffix.EffectiveTLDPlusOne(u.Hostname())
+	if err != nil {
+		domain = u.Hostname()
+	}
+	return domain + ".checkpoint.json"
 }
 
 // validatePresentation checks CLI-only knobs that scanner.Config doesn't know
