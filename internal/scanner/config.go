@@ -6,6 +6,7 @@ package scanner
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -24,7 +25,8 @@ type Config struct {
 	HostDelay      time.Duration
 	DryRun         bool
 	NoCache        bool
-	MaxURLs        int // cap on URLs to process; 0 = unlimited
+	MaxURLs        int         // cap on URLs to process; 0 = unlimited
+	Headers        http.Header // extra request headers; override the defaults
 }
 
 // Validate accumulates and returns all range/value errors at once so the CLI

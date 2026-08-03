@@ -51,6 +51,12 @@ func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string)
 	}
 	req.Header.Set("User-Agent", cfg.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml,application/rss+xml,application/atom+xml;q=0.9,*/*;q=0.8")
+	for name, values := range cfg.Headers {
+		req.Header[http.CanonicalHeaderKey(name)] = values
+	}
+	if host := cfg.Headers.Get("Host"); host != "" {
+		req.Host = host
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

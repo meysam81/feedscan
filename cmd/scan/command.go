@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,6 +37,8 @@ type presentation struct {
 func Command() *cli.Command {
 	cfg := &scanner.Config{}
 	pres := &presentation{}
+	var headerArgs []string
+	var headersFile string
 
 	return &cli.Command{
 		Name:  "scan",
@@ -142,12 +145,30 @@ func Command() *cli.Command {
 				Sources:     cli.EnvVars("FEEDSCAN_SORT_ORDER"),
 				Destination: &pres.SortOrder,
 			},
+			&cli.StringSliceFlag{
+				Name:        "header",
+				Aliases:     []string{"H"},
+				Usage:       `extra request header, "Name: value" (repeatable)`,
+				Sources:     cli.EnvVars("FEEDSCAN_HEADER"),
+				Destination: &headerArgs,
+			},
+			&cli.StringFlag{
+				Name:        "headers-file",
+				Usage:       `file of "Name: value" lines, one header per line`,
+				Sources:     cli.EnvVars("FEEDSCAN_HEADERS_FILE"),
+				Destination: &headersFile,
+			},
 			cliflags.FormatFlag(&pres.Format, "json"),
 		},
 		Action: func(ctx context.Context, _ *cli.Command) error {
 			if err := normalize(cfg, pres); err != nil {
 				return err
 			}
+			headers, err := resolveHeaders(headersFile, headerArgs)
+			if err != nil {
+				return err
+			}
+			cfg.Headers = headers
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
@@ -196,6 +217,34 @@ func defaultCheckpointPath(inputURL string) string {
 		domain = u.Hostname()
 	}
 	return domain + ".checkpoint.json"
+}
+
+// resolveHeaders merges the headers file (if any) with repeated --header
+// flags. Flags win: they're the more specific, per-invocation input.
+func resolveHeaders(path string, args []string) (http.Header, error) {
+	var lines []string
+	if path != "" {
+		fileLines, err := scanner.ReadHeaderFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("headers file: %w", err)
+		}
+		lines = fileLines
+	}
+	fileHeaders, err := scanner.ParseHeaders(lines)
+	if err != nil {
+		return nil, fmt.Errorf("headers file %s: %w", path, err)
+	}
+	flagHeaders, err := scanner.ParseHeaders(args)
+	if err != nil {
+		return nil, err
+	}
+	for name, values := range flagHeaders {
+		fileHeaders[name] = values
+	}
+	if len(fileHeaders) == 0 {
+		return nil, nil
+	}
+	return fileHeaders, nil
 }
 
 // validatePresentation checks CLI-only knobs that scanner.Config doesn't know
