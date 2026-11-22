@@ -120,3 +120,47 @@ func TestWritePostsJSON(t *testing.T) {
 		t.Error("expected an error for an unknown format")
 	}
 }
+
+func TestExcludeHosts(t *testing.T) {
+	t.Parallel()
+	var posts []checkpoint.Post
+	for _, u := range []string{
+		"https://example.com/a",
+		"https://www.example.com/b",
+		"https://Blog.Example.com:8443/c",
+		"https://notexample.com/d",
+		"https://example.com.evil.test/e",
+		"https://other.test/f",
+	} {
+		posts = append(posts, checkpoint.Post{URL: u})
+	}
+	hosts := func(ps []checkpoint.Post) string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = strings.TrimPrefix(p.URL[:strings.LastIndex(p.URL, "/")], "https://")
+		}
+		return strings.Join(out, " ")
+	}
+	const all = "example.com www.example.com Blog.Example.com:8443 notexample.com example.com.evil.test other.test"
+
+	tests := []struct {
+		name    string
+		exclude []string
+		want    string
+	}{
+		{"nothing excluded", nil, all},
+		{"blank entries ignored", []string{"", "  "}, all},
+		{"domain covers its subdomains only", []string{"example.com"}, "notexample.com example.com.evil.test other.test"},
+		{"a subdomain alone", []string{"www.example.com"}, "example.com Blog.Example.com:8443 notexample.com example.com.evil.test other.test"},
+		{"case and pasted URL", []string{" HTTPS://Example.COM/some/path ", "other.test:443"}, "notexample.com example.com.evil.test"},
+		{"unknown host", []string{"nowhere.test"}, all},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hosts(ExcludeHosts(posts, tt.exclude)); got != tt.want {
+				t.Errorf("got  %s\nwant %s", got, tt.want)
+			}
+		})
+	}
+}

@@ -122,3 +122,25 @@ func TestRejectsNegativeLimit(t *testing.T) {
 		t.Fatal("expected an error for a negative limit")
 	}
 }
+
+func TestExcludeHidesHostBeforeLimit(t *testing.T) {
+	a, b := seedTwo(t, t.TempDir())
+
+	// Without the exclusion the single row would be b.example's "Newest".
+	out, err := run(t, "--checkpoint", a, "--checkpoint", b, "--exclude", "b.example", "-n", "1")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := rows(t, out); len(got) != 1 || !strings.HasPrefix(got[0], "Shared") {
+		t.Errorf("got %q, want the next-newest post from another host", got)
+	}
+
+	t.Setenv("FEEDSCAN_EXCLUDE", "b.example,shared.example")
+	out, err = run(t, "--checkpoint", a, "--checkpoint", b)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := rows(t, out); len(got) != 1 || !strings.HasPrefix(got[0], "Oldest") {
+		t.Errorf("FEEDSCAN_EXCLUDE with two hosts: got %q", got)
+	}
+}

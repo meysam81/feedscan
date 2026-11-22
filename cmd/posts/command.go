@@ -32,10 +32,11 @@ const checkpointGlob = "*.checkpoint.json"
 // with their own meanings.
 func Command() *cli.Command {
 	var (
-		paths  []string
-		format string
-		limit  int
-		days   int
+		paths   []string
+		exclude []string
+		format  string
+		limit   int
+		days    int
 	)
 	formatFlag := cliflags.FormatFlag(&format, "table")
 	formatFlag.Local = true
@@ -66,6 +67,13 @@ func Command() *cli.Command {
 				// exporting it for scan must not silently shorten this list.
 				Sources:     cli.EnvVars("FEEDSCAN_POSTS_DAYS"),
 				Destination: &days,
+				Local:       true,
+			},
+			&cli.StringSliceFlag{
+				Name:        "exclude",
+				Usage:       "hide posts from this host and its subdomains (repeatable)",
+				Sources:     cli.EnvVars("FEEDSCAN_EXCLUDE"),
+				Destination: &exclude,
 				Local:       true,
 			},
 			formatFlag,
@@ -100,7 +108,7 @@ func Command() *cli.Command {
 				all = append(all, cp.AllPosts()...)
 			}
 
-			selected := report.SelectPosts(all, time.Now(), days, limit)
+			selected := report.SelectPosts(report.ExcludeHosts(all, exclude), time.Now(), days, limit)
 			if len(all) == 0 {
 				fmt.Fprintln(os.Stderr, "no posts saved yet; run `feedscan scan --url <page> --no-cache` to fetch them")
 			}

@@ -83,10 +83,11 @@ Notes on running a tiny DNS server at home, part …  bob.example/2026/05/notes-
 --checkpoint    checkpoint file to read (repeatable; default: every *.checkpoint.json here)
 --limit, -n     max posts (default 50, 0 = all)
 --days          only posts from the last N days (default 0 = any age)
+--exclude       hide posts from this host and its subdomains (repeatable)
 --format        output format: json|table (default table)
 ```
 
-These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS` and `FEEDSCAN_FORMAT`.
+These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS`, `FEEDSCAN_EXCLUDE` (comma-separated) and `FEEDSCAN_FORMAT`.
 
 ```sh
 # The 10 newest posts:
@@ -97,6 +98,10 @@ feedscan --days 7 -n 0
 
 # One source only:
 feedscan --checkpoint 512kb.club.checkpoint.json
+
+# Hide a site that drowns out the rest (also hides www.example.com, blog.example.com):
+feedscan --exclude example.com --exclude noisy.example.org
+export FEEDSCAN_EXCLUDE=example.com,noisy.example.org   # or once, for every run
 
 # Full titles and URLs (the table shortens both), e.g. to open the newest post:
 feedscan --format json | jq -r '.[0].url'

@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,47 @@ import (
 // futureSlack is how far ahead of now a post may be dated before it's treated
 // as bogus (scheduled post, broken clock) and hidden. A day covers timezones.
 const futureSlack = 24 * time.Hour
+
+// ExcludeHosts drops the posts published on any of hosts or on a subdomain of
+// one: "example.com" also covers "www.example.com", never "notexample.com".
+// Matching ignores case; an entry pasted as a URL counts by its host.
+func ExcludeHosts(posts []checkpoint.Post, hosts []string) []checkpoint.Post {
+	var excluded []string
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if _, rest, ok := strings.Cut(h, "://"); ok {
+			h = rest
+		}
+		if i := strings.IndexAny(h, "/:"); i >= 0 { // path or port
+			h = h[:i]
+		}
+		if h != "" {
+			excluded = append(excluded, h)
+		}
+	}
+	if len(excluded) == 0 {
+		return posts
+	}
+
+	out := make([]checkpoint.Post, 0, len(posts))
+	for _, p := range posts {
+		host := ""
+		if u, err := url.Parse(p.URL); err == nil {
+			host = strings.ToLower(u.Hostname())
+		}
+		skip := false
+		for _, h := range excluded {
+			if host == h || strings.HasSuffix(host, "."+h) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // SelectPosts turns the merged posts of one or more checkpoints into the list
 // to show: de-duplicated by URL, newest first, without future-dated posts.
