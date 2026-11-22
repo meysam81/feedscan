@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4](https://github.com/meysam81/feedscan/compare/v0.0.3...v0.0.4) (2026-11-22)
+
+
+### Bug Fixes
+
+* **checkpoint:** make file lock build on windows ([#17](https://github.com/meysam81/feedscan/issues/17)) ([c4aac6b](https://github.com/meysam81/feedscan/commit/c4aac6b91b8dc72912c527e44a854c2ac919261c))
+
 ## [0.0.3](https://github.com/meysam81/feedscan/compare/v0.0.2...v0.0.3) (2026-11-22)
 
 
