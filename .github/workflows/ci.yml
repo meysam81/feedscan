@@ -30,6 +30,18 @@ jobs:
           go-version-file: go.mod
       - run: go build ./...
       - run: go test ./...
+      # Cross-compile every release target so platform-specific breakage
+      # fails the PR instead of the post-merge goreleaser job.
+      - name: cross-compile release targets
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            echo "::group::${target}"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+            echo "::endgroup::"
+          done
 
   release-please:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
