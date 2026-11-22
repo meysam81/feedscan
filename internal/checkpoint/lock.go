@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-
-	"golang.org/x/sys/unix"
 )
 
 // FileLock is an advisory OS-level lock on a sidecar `.lock` file. Use it
@@ -15,6 +13,9 @@ import (
 // Why a sidecar (not the checkpoint file itself): atomic rename in Save
 // replaces the underlying inode, which would silently release a flock held
 // on the old inode.
+//
+// The locking primitive is platform-specific: flock(2) on Unix
+// (lock_unix.go) and LockFileEx on Windows (lock_windows.go).
 type FileLock struct {
 	f *os.File
 }
@@ -27,7 +28,7 @@ func AcquireLock(path string) (*FileLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
 	}
-	if err := unix.Flock(fd(f), unix.LOCK_EX); err != nil {
+	if err := lockFile(f); err != nil {
 		return nil, errors.Join(fmt.Errorf("acquire lock: %w", err), f.Close())
 	}
 	return &FileLock{f: f}, nil
@@ -38,15 +39,7 @@ func (l *FileLock) Close() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(fd(l.f), unix.LOCK_UN)
+	unlockErr := unlockFile(l.f)
 	closeErr := l.f.Close()
 	return errors.Join(unlockErr, closeErr)
-}
-
-// fd converts *os.File to the int file descriptor unix.Flock expects. The
-// conversion from uintptr is safe in practice — file descriptors fit in an
-// int on every supported platform — but gosec G115 flags the cast, so we
-// isolate it in one place we can audit.
-func fd(f *os.File) int {
-	return int(f.Fd()) //nolint:gosec // file descriptor always fits in int
 }
