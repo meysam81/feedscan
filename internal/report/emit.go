@@ -21,13 +21,14 @@ import (
 
 // Truncate returns s clamped to n runes, with an ellipsis for truncation.
 func Truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
-		return s[:n]
+		return string(r[:n])
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }
 
 // FormatTimePtr returns t in RFC3339 or "" if nil. Used by every table cell
@@ -69,40 +70,42 @@ func WriteByStatus(w io.Writer, counts map[checkpoint.Status]int) error {
 
 // ─── Table renderer ─────────────────────────────────────────────────────────
 
-// Column describes one column of a Result table. Width is the field-width for
-// the printf format (negative would left-align — we always left-align).
-type Column struct {
+// Column describes one column of a table of T rows. Width is the field-width
+// for the printf format (negative would left-align — we always left-align).
+type Column[T any] struct {
 	Name  string
 	Width int
-	Get   func(checkpoint.Result) string
+	Get   func(T) string
 }
+
+type resultColumn = Column[checkpoint.Result]
 
 // resultColumns are the canonical columns for a Result table. Callers pick
 // which subset they want.
 var resultColumns = struct {
-	URL, Status, Latest, Visited, Feed Column
+	URL, Status, Latest, Visited, Feed resultColumn
 }{
-	URL:     Column{Name: "URL", Width: 60, Get: func(r checkpoint.Result) string { return Truncate(r.URL, 60) }},
-	Status:  Column{Name: "STATUS", Width: 10, Get: func(r checkpoint.Result) string { return string(r.Status) }},
-	Latest:  Column{Name: "LATEST", Width: 25, Get: func(r checkpoint.Result) string { return FormatTimePtr(r.LatestPost) }},
-	Visited: Column{Name: "VISITED", Width: 25, Get: func(r checkpoint.Result) string { return FormatTimePtr(r.VisitedAt) }},
-	Feed:    Column{Name: "FEED", Width: 0, Get: func(r checkpoint.Result) string { return r.FeedURL }},
+	URL:     resultColumn{Name: "URL", Width: 60, Get: func(r checkpoint.Result) string { return Truncate(r.URL, 60) }},
+	Status:  resultColumn{Name: "STATUS", Width: 10, Get: func(r checkpoint.Result) string { return string(r.Status) }},
+	Latest:  resultColumn{Name: "LATEST", Width: 25, Get: func(r checkpoint.Result) string { return FormatTimePtr(r.LatestPost) }},
+	Visited: resultColumn{Name: "VISITED", Width: 25, Get: func(r checkpoint.Result) string { return FormatTimePtr(r.VisitedAt) }},
+	Feed:    resultColumn{Name: "FEED", Width: 0, Get: func(r checkpoint.Result) string { return r.FeedURL }},
 }
 
 // FullColumns returns URL, STATUS, LATEST, VISITED, FEED — for scan's
 // verbose output.
-func FullColumns() []Column {
-	return []Column{resultColumns.URL, resultColumns.Status, resultColumns.Latest, resultColumns.Visited, resultColumns.Feed}
+func FullColumns() []Column[checkpoint.Result] {
+	return []resultColumn{resultColumns.URL, resultColumns.Status, resultColumns.Latest, resultColumns.Visited, resultColumns.Feed}
 }
 
 // CursorColumns returns URL, STATUS, LATEST, VISITED — for cursor's emitters
 // (feed URL is uninteresting when triaging which feeds to read).
-func CursorColumns() []Column {
-	return []Column{resultColumns.URL, resultColumns.Status, resultColumns.Latest, resultColumns.Visited}
+func CursorColumns() []Column[checkpoint.Result] {
+	return []resultColumn{resultColumns.URL, resultColumns.Status, resultColumns.Latest, resultColumns.Visited}
 }
 
-// WriteTable renders results in a fixed-width table with the supplied columns.
-func WriteTable(w io.Writer, cols []Column, results []checkpoint.Result) error {
+// WriteTable renders rows in a fixed-width table with the supplied columns.
+func WriteTable[T any](w io.Writer, cols []Column[T], results []T) error {
 	if len(cols) == 0 {
 		return nil
 	}
@@ -131,7 +134,7 @@ func WriteTable(w io.Writer, cols []Column, results []checkpoint.Result) error {
 
 // buildTableFormats returns (headerFmt, rowFmt, sepWidth) for the columns.
 // Width 0 columns are rendered without padding — used for the trailing column.
-func buildTableFormats(cols []Column) (header, row string, sep int) {
+func buildTableFormats[T any](cols []Column[T]) (header, row string, sep int) {
 	var hb, rb strings.Builder
 	for i, c := range cols {
 		if i > 0 {

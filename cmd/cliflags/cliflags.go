@@ -29,7 +29,7 @@ func CheckpointFlag(dest *string, required bool, defaultValue string) cli.Flag {
 }
 
 // FormatFlag returns the --format flag bound to dest with the given default.
-func FormatFlag(dest *string, defaultValue string) cli.Flag {
+func FormatFlag(dest *string, defaultValue string) *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:        "format",
 		Usage:       "output format: json|table",

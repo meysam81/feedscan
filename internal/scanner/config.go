@@ -26,6 +26,7 @@ type Config struct {
 	DryRun         bool
 	NoCache        bool
 	MaxURLs        int         // cap on URLs to process; 0 = unlimited
+	MaxPosts       int         // newest posts kept per site; 0 = keep none
 	Headers        http.Header // extra request headers; override the defaults
 }
 
@@ -47,6 +48,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxURLs < 0 {
 		errs = append(errs, errors.New("max-urls must be >= 0"))
+	}
+	if c.MaxPosts < 0 {
+		errs = append(errs, errors.New("max-posts must be >= 0"))
 	}
 	if c.Timeout <= 0 {
 		errs = append(errs, errors.New("timeout must be > 0"))

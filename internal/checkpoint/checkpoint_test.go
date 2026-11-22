@@ -251,3 +251,55 @@ func TestGetTTL(t *testing.T) {
 func writeFile(path string, b []byte) error {
 	return os.WriteFile(path, b, 0o644)
 }
+
+func TestPostsStoredBesideEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cp.json")
+	now := time.Now().UTC().Truncate(time.Second)
+	post := Post{Title: "hello", URL: "https://a.example/hello", Date: now}
+
+	cp := New()
+	cp.Put(Result{URL: "https://a.example", Status: StatusActive, CheckedAt: &now, Posts: []Post{post}})
+	cp.Put(Result{URL: "https://b.example", Status: StatusNoFeed, CheckedAt: &now})
+	if err := cp.Mark("https://a.example", now); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if err := cp.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := loaded.AllPosts(); len(got) != 1 || got[0] != post {
+		t.Fatalf("posts not preserved across save/load: %+v", got)
+	}
+	// Entries (what scan and cursor print) must stay free of posts.
+	for _, r := range loaded.Snapshot() {
+		if r.Posts != nil {
+			t.Errorf("entry %s carries posts: %+v", r.URL, r.Posts)
+		}
+	}
+
+	// A re-probe that finds no posts clears the site's old ones.
+	loaded.Put(Result{URL: "https://a.example", Status: StatusError, CheckedAt: &now})
+	if got := loaded.AllPosts(); len(got) != 0 {
+		t.Fatalf("stale posts kept after re-probe: %+v", got)
+	}
+}
+
+func TestLoadCheckpointWithoutPosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cp.json")
+	if err := os.WriteFile(path, []byte(`{"entries":{"https://a.example":{"url":"https://a.example"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cp, warn, err := Load(path)
+	if err != nil || warn != "" {
+		t.Fatalf("load: err=%v warn=%q", err, warn)
+	}
+	// Put on a pre-posts checkpoint must not panic on a nil map.
+	cp.Put(Result{URL: "https://a.example", Posts: []Post{{URL: "https://a.example/p"}}})
+	if got := cp.AllPosts(); len(got) != 1 {
+		t.Fatalf("got %d posts, want 1", len(got))
+	}
+}

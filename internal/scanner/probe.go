@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mmcdole/gofeed"
 	"golang.org/x/net/html"
@@ -113,6 +115,7 @@ func probeOne(ctx context.Context, client *http.Client, parser *gofeed.Parser, c
 
 	r.ItemCount = len(feed.Items)
 	r.LatestPost = timePtr(latestItemDate(feed))
+	r.Posts = postsFrom(feed, feedURL, cfg.MaxPosts)
 	// Status (active/stale) is set by ApplyFreshness after the cutoff is known.
 	r.Status = checkpoint.StatusStale
 	return r
@@ -244,6 +247,65 @@ func itemTime(item *gofeed.Item) time.Time {
 		return *item.PublishedParsed
 	}
 	return time.Time{}
+}
+
+// postsFrom returns the feed's newest limit items as posts, newest first.
+// Feed content is untrusted: items without a date (can't be ordered) or
+// without an http(s) link are dropped, relative links are resolved against
+// the feed URL, and titles are flattened to one printable line.
+func postsFrom(feed *gofeed.Feed, feedURL string, limit int) []checkpoint.Post {
+	base, err := url.Parse(feedURL)
+	if err != nil || limit <= 0 {
+		return nil
+	}
+	var out []checkpoint.Post
+	for _, item := range feed.Items {
+		date := postTime(item)
+		if date.IsZero() {
+			continue
+		}
+		raw := strings.TrimSpace(item.Link)
+		if raw == "" { // would otherwise resolve to the feed URL itself
+			continue
+		}
+		link, err := base.Parse(raw)
+		if err != nil || (link.Scheme != "https" && link.Scheme != "http") {
+			continue
+		}
+		out = append(out, checkpoint.Post{Title: cleanTitle(item.Title), URL: link.String(), Date: date})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// postTime is when the post was published, falling back to its last update.
+// The reverse of itemTime: an edited old post must not look new in the list.
+func postTime(item *gofeed.Item) time.Time {
+	if item.PublishedParsed != nil {
+		return *item.PublishedParsed
+	}
+	if item.UpdatedParsed != nil {
+		return *item.UpdatedParsed
+	}
+	return time.Time{}
+}
+
+// cleanTitle collapses whitespace runs and drops control characters so a
+// title can't break a table row or smuggle terminal escapes.
+func cleanTitle(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // ApplyFreshness sets active/stale based on cutoff. Other statuses pass through.
