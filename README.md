@@ -16,7 +16,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/meysam81/feedscan?logo=github&style=flat-square)](https://github.com/meysam81/feedscan/commits/main)
 [![Stars](https://img.shields.io/github/stars/meysam81/feedscan?logo=github&style=flat-square)](https://github.com/meysam81/feedscan/stargazers)
 
-Fetch a URL, extract external HTTPS links, probe each for an RSS/Atom feed, and report which feeds have published within a freshness window.
+Point it at a page full of links (a blogroll, a directory, a webring). It finds the RSS/Atom feed of every site linked there and gives you one newest-first list of their blog posts.
 
 ## Install
 
@@ -58,11 +58,55 @@ go build -o feedscan .
 
 ## Usage
 
+Two steps: `scan` fetches, the default command lists.
+
 ```sh
-feedscan scan --url https://example.com/blog
-# or just (scan is the default subcommand):
-feedscan --url example.com
+# 1. Fetch: find the sites linked from a page and save their posts.
+feedscan scan --url https://example.com/blogroll
+
+# 2. List: newest posts across everything scanned so far (instant, offline).
+feedscan
 ```
+
+```
+TITLE                                               URL                                       DATE
+--------------------------------------------------------------------------------------------------------
+Why I moved my blog off a static site generator     alice.example/posts/why-i-moved-my-blog   2026-05-16
+Notes on running a tiny DNS server at home, part …  bob.example/2026/05/notes-on-running-a-…  2026-05-14
+```
+
+### Listing posts
+
+`feedscan` (short for `feedscan posts`) reads every `*.checkpoint.json` in the current directory, merges them, and prints the newest posts first. A post linked from several scans is listed once. Nothing is fetched; run `scan` again to refresh.
+
+```
+--checkpoint    checkpoint file to read (repeatable; default: every *.checkpoint.json here)
+--limit, -n     max posts (default 50, 0 = all)
+--days          only posts from the last N days (default 0 = any age)
+--format        output format: json|table (default table)
+```
+
+These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS` and `FEEDSCAN_FORMAT`.
+
+```sh
+# The 10 newest posts:
+feedscan -n 10
+
+# Everything from the last week:
+feedscan --days 7 -n 0
+
+# One source only:
+feedscan --checkpoint 512kb.club.checkpoint.json
+
+# Full titles and URLs (the table shortens both), e.g. to open the newest post:
+feedscan --format json | jq -r '.[0].url'
+```
+
+Posts are dated by when they were published, so editing an old post doesn't move it up. Posts without a date, and posts dated more than a day in the future, are left out.
+
+### Scanning
+
+`scan` fetches the page, probes every external site for a feed, saves each site's newest posts, and prints a per-site summary.
 
 Common flags for `scan`:
 
@@ -73,11 +117,12 @@ Common flags for `scan`:
 --concurrency   max concurrent workers (default 8)
 --batch         URLs per batch (default 32)
 --cache-ttl     checkpoint TTL (default 24h)
---checkpoint    checkpoint file path (default ./feedscan.checkpoint.json)
+--checkpoint    checkpoint file path (default ./<domain>.checkpoint.json, from --url)
 --dry-run       extract URLs but skip feed probing
 --no-cache      ignore checkpoint cache
 --verbose       print full result list (default: aggregated summary + top 3)
 --max-urls      cap on extracted URLs to process (0 = unlimited)
+--max-posts     newest posts to keep per site for the posts list (default 50, 0 = none)
 --sort-by       sort field: url|status|latest_post|item_count|checked_at (default latest_post)
 --sort-order    sort order: asc|desc (default desc)
 --format        output format: json|table (default json)
@@ -89,42 +134,44 @@ Common flags for `scan`:
 
 Every flag has a `FEEDSCAN_*` env-var equivalent (e.g. `FEEDSCAN_URL`, `FEEDSCAN_CHECKPOINT`).
 
+> **Upgrading from 0.0.x:** a bare `feedscan` now lists posts instead of scanning, also when `FEEDSCAN_URL` is set; scanning always needs the subcommand (`feedscan scan --url example.com`). Checkpoints written by older versions hold no posts, so run `feedscan scan --url <page> --no-cache` once with the new version to fetch them. An older binary that scans afterwards drops them again.
+
 ### Examples
 
 Aggregated summary (default — total + breakdown by status + top 3 results):
 
 ```sh
-feedscan --url example.com
+feedscan scan --url example.com
 ```
 
 Verbose output — every probed URL:
 
 ```sh
-feedscan --url example.com --verbose
+feedscan scan --url example.com --verbose
 ```
 
 Try a small batch first:
 
 ```sh
-feedscan --url example.com --max-urls 10
+feedscan scan --url example.com --max-urls 10
 ```
 
 Dry run — list external URLs without probing feeds:
 
 ```sh
-feedscan --url example.com --dry-run
+feedscan scan --url example.com --dry-run
 ```
 
 30-day window with higher concurrency, table output:
 
 ```sh
-feedscan --url example.com --days 30 --concurrency 16 --format table --verbose
+feedscan scan --url example.com --days 30 --concurrency 16 --format table --verbose
 ```
 
 Force a fresh scan, ignoring cached results:
 
 ```sh
-feedscan --url example.com --no-cache
+feedscan scan --url example.com --no-cache
 ```
 
 ## Reading cursor
@@ -159,7 +206,7 @@ Re-running `scan` preserves your reading state — `visited_at` is never overwri
 
 ### Output
 
-Each result has one of four statuses:
+Each scanned site has one of four statuses:
 
 - `active` — feed found, latest post within the window
 - `stale` — feed found, no posts within the window
@@ -187,9 +234,20 @@ Each result has one of four statuses:
       "checked_at": "2026-05-17T05:00:00Z",
       "visited_at": "2026-05-17T05:28:09Z"
     }
+  },
+  "posts": {
+    "https://example.com": [
+      {
+        "title": "Hello, world",
+        "url": "https://example.com/hello-world",
+        "date": "2026-05-08T15:54:49Z"
+      }
+    ]
   }
 }
 ```
+
+`posts` holds each site's newest posts (up to `--max-posts`), newest first, and is replaced whenever the site is re-scanned.
 
 `visited_at` is only set when you run `feedscan cursor mark`; it's UTC RFC3339.
 

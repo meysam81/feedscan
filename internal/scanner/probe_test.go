@@ -175,3 +175,44 @@ func TestTimePtr(t *testing.T) {
 		t.Errorf("non-zero time → expected ptr to same, got %v", got)
 	}
 }
+
+func TestPostsFrom(t *testing.T) {
+	t.Parallel()
+	day := func(d int) *time.Time {
+		tm := time.Date(2026, 5, d, 0, 0, 0, 0, time.UTC)
+		return &tm
+	}
+	feed := &gofeed.Feed{Items: []*gofeed.Item{
+		{Title: "old", Link: "https://a.example/old", PublishedParsed: day(1)},
+		// Published wins over a later update: an edit must not bump the post.
+		{Title: "edited", Link: "https://a.example/edited", PublishedParsed: day(2), UpdatedParsed: day(20)},
+		{Title: "updated only", Link: "/relative", UpdatedParsed: day(3)},
+		{Title: " multi\n line\ttitle\x1b[31m ", Link: "https://a.example/messy", PublishedParsed: day(4)},
+		{Title: "undated", Link: "https://a.example/undated"},
+		{Title: "no link", Link: "  ", PublishedParsed: day(5)},
+		{Title: "bad scheme", Link: "javascript:alert(1)", PublishedParsed: day(6)},
+	}}
+
+	got := postsFrom(feed, "https://a.example/feed.xml", 50)
+	want := []checkpoint.Post{
+		{Title: "multi line title[31m", URL: "https://a.example/messy", Date: *day(4)},
+		{Title: "updated only", URL: "https://a.example/relative", Date: *day(3)},
+		{Title: "edited", URL: "https://a.example/edited", Date: *day(2)},
+		{Title: "old", URL: "https://a.example/old", Date: *day(1)},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d posts, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("post %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	if capped := postsFrom(feed, "https://a.example/feed.xml", 2); len(capped) != 2 || capped[0] != want[0] || capped[1] != want[1] {
+		t.Errorf("cap must keep the newest 2, got %+v", capped)
+	}
+	if none := postsFrom(feed, "https://a.example/feed.xml", 0); none != nil {
+		t.Errorf("limit 0 must keep nothing, got %+v", none)
+	}
+}

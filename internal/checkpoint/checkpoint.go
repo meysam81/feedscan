@@ -36,6 +36,14 @@ func AllStatuses() []Status {
 	return []Status{StatusActive, StatusStale, StatusNoFeed, StatusError}
 }
 
+// Post is one feed item kept for the posts listing. Date is always set:
+// undated items are dropped at probe time because they can't be ordered.
+type Post struct {
+	Title string    `json:"title"`
+	URL   string    `json:"url"`
+	Date  time.Time `json:"date"`
+}
+
 // Result is the per-URL outcome plus reading state.
 //
 // Time fields are pointers so encoding/json's omitempty correctly drops them
@@ -50,12 +58,19 @@ type Result struct {
 	Error      string     `json:"error,omitempty"`
 	CheckedAt  *time.Time `json:"checked_at,omitempty"`
 	VisitedAt  *time.Time `json:"visited_at,omitempty"`
+
+	// Posts carries a fresh probe's feed items into Put. It is never
+	// serialized with the Result — posts persist in Checkpoint.Posts — so
+	// scan and cursor output stay free of them.
+	Posts []Post `json:"-"`
 }
 
 // Checkpoint is the on-disk JSON document.
 type Checkpoint struct {
 	mu      sync.Mutex
 	Entries map[string]Result `json:"entries"`
+	// Posts holds each site's newest feed items, keyed like Entries.
+	Posts map[string][]Post `json:"posts,omitempty"`
 }
 
 // ErrUnknownURL is returned by Mark/Unmark when the URL is not in the
@@ -65,7 +80,7 @@ var ErrUnknownURL = errors.New("url not found in checkpoint")
 
 // New returns an empty checkpoint.
 func New() *Checkpoint {
-	return &Checkpoint{Entries: make(map[string]Result)}
+	return &Checkpoint{Entries: make(map[string]Result), Posts: make(map[string][]Post)}
 }
 
 // Load reads a checkpoint file. Missing file → empty checkpoint (not an error).
@@ -94,6 +109,9 @@ func Load(path string) (cp *Checkpoint, warn string, err error) {
 	if cp.Entries == nil {
 		cp.Entries = make(map[string]Result)
 	}
+	if cp.Posts == nil {
+		cp.Posts = make(map[string][]Post)
+	}
 	return
 }
 
@@ -113,14 +131,33 @@ func (c *Checkpoint) Get(u string, now time.Time, ttl time.Duration) (Result, bo
 }
 
 // Put stores or replaces a probe result. Preserves any existing VisitedAt so
-// re-scanning never clears the user's reading history.
+// re-scanning never clears the user's reading history. The site's posts are
+// replaced along with the result: a probe that found none clears them.
 func (c *Checkpoint) Put(r Result) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if prev, ok := c.Entries[r.URL]; ok && r.VisitedAt == nil {
 		r.VisitedAt = prev.VisitedAt
 	}
+	if len(r.Posts) > 0 {
+		c.Posts[r.URL] = r.Posts
+	} else {
+		delete(c.Posts, r.URL)
+	}
+	r.Posts = nil
 	c.Entries[r.URL] = r
+}
+
+// AllPosts returns every site's posts as one flat slice, in no particular
+// order. The caller may sort/filter freely without holding the lock.
+func (c *Checkpoint) AllPosts() []Post {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []Post
+	for _, posts := range c.Posts {
+		out = append(out, posts...)
+	}
+	return out
 }
 
 // Mark stamps an entry's VisitedAt. Returns ErrUnknownURL if u isn't tracked.

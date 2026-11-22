@@ -23,6 +23,10 @@ func TestTruncate(t *testing.T) {
 		{"this is a long string", 10, "this is a…"},
 		{"x", 1, "x"},
 		{"abc", 0, ""},
+		// Counts runes, not bytes: must not cut a character in half.
+		{"héllo wörld", 6, "héllo…"},
+		{"日本語のタイトル", 4, "日本語…"},
+		{"日本語", 3, "日本語"},
 	}
 	for _, tt := range tests {
 		if got := Truncate(tt.in, tt.n); got != tt.want {

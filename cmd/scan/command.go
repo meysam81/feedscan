@@ -1,4 +1,5 @@
-// Package scan exposes the top-level feedscan scan subcommand (the default).
+// Package scan exposes the feedscan scan subcommand: it fetches, probes, and
+// fills the checkpoint that the default posts subcommand reads.
 //
 // Output formatting lives here, not in internal/scanner — the pipeline
 // produces data structures; this Action turns them into bytes.
@@ -42,7 +43,7 @@ func Command() *cli.Command {
 
 	return &cli.Command{
 		Name:  "scan",
-		Usage: "Fetch a URL, extract external links, probe each for an active RSS/Atom feed",
+		Usage: "Fetch a URL, extract external links, probe each for an active RSS/Atom feed, save its posts",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "url",
@@ -130,6 +131,13 @@ func Command() *cli.Command {
 				Usage:       "cap on extracted URLs to process (0 = unlimited)",
 				Sources:     cli.EnvVars("FEEDSCAN_MAX_URLS"),
 				Destination: &cfg.MaxURLs,
+			},
+			&cli.IntFlag{
+				Name:        "max-posts",
+				Usage:       "newest posts to keep per site for the posts list (0 = none)",
+				Value:       50,
+				Sources:     cli.EnvVars("FEEDSCAN_MAX_POSTS"),
+				Destination: &cfg.MaxPosts,
 			},
 			&cli.StringFlag{
 				Name:        "sort-by",
