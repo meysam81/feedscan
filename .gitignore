@@ -27,4 +27,7 @@ go.work
 # End of https://www.toptal.com/developers/gitignore/api/go
 feedscan
 /*.checkpoint.json*
-/headers.txt
+/headers*.txt
+/archive.csv
+/repos.csv
+/old
