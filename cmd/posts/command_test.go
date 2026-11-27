@@ -259,6 +259,9 @@ func TestLiveSkipsFailedFeedsAndReportsThem(t *testing.T) {
 	if got := rows(t, out); len(got) != 1 || !strings.HasPrefix(got[0], "live alice") {
 		t.Errorf("got rows %q, want only alice's post", got)
 	}
+	if !strings.Contains(stderr, "fetching 2 feeds") {
+		t.Errorf("stderr must say what the wait is for, got %q", stderr)
+	}
 	if !strings.Contains(stderr, "1 of 2 feeds failed") {
 		t.Errorf("stderr must report the failure count, got %q", stderr)
 	}
@@ -337,5 +340,54 @@ func TestInterruptedLiveRunIsAnErrorWithNoList(t *testing.T) {
 	err := cmd.Run(ctx, []string{"posts", "--checkpoint", path})
 	if !errors.Is(err, context.Canceled) || out.Len() != 0 {
 		t.Errorf("want context.Canceled and no output, got err=%v out=%q", err, out.String())
+	}
+}
+
+// --timeout and --concurrency must reach the fetcher, not just be validated.
+func TestNetworkFlagsApply(t *testing.T) {
+	var inFlight, peak atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+		}
+		delay := 50 * time.Millisecond
+		if r.URL.Path == "/slow" {
+			delay = 2 * time.Second
+		}
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprintf(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>`+
+			`<item><title>ok</title><link>/p</link><pubDate>%s</pubDate></item></channel></rss>`,
+			time.Now().Add(-time.Hour).UTC().Format(time.RFC1123Z))
+	})
+	// One server per feed: feeds on the same host are spaced out anyway.
+	dir := t.TempDir()
+	var args []string
+	for i, path := range []string{"/a", "/b", "/slow"} {
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		cp := filepath.Join(dir, fmt.Sprintf("%d.checkpoint.json", i))
+		writeSite(t, cp, fmt.Sprintf("https://site%d.example", i), srv.URL+path)
+		args = append(args, "--checkpoint", cp)
+	}
+
+	_, stderr, err := runArgs(t, append(args, "--timeout", "500ms")...)
+	if err != nil || !strings.Contains(stderr, "1 of 3 feeds failed") {
+		t.Errorf("--timeout 500ms: want the slow feed skipped, got err=%v stderr=%q", err, stderr)
+	}
+	if got := peak.Load(); got < 2 {
+		t.Errorf("default concurrency: peak = %d, want feeds fetched in parallel", got)
+	}
+
+	peak.Store(0)
+	if _, _, err := runArgs(t, append(args, "--timeout", "500ms", "--concurrency", "1")...); err != nil {
+		t.Fatalf("--concurrency 1: %v", err)
+	}
+	if got := peak.Load(); got != 1 {
+		t.Errorf("--concurrency 1: peak = %d, want 1", got)
 	}
 }

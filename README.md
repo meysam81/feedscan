@@ -79,7 +79,7 @@ Notes on running a tiny DNS server at home, part …  bob.example/2026/05/notes-
 
 `feedscan` (short for `feedscan posts`) reads every `*.checkpoint.json` in the current directory, fetches the feed of every site those scans found, and prints the newest posts first. A post linked from several scans is listed once. The list is always current, however long ago you scanned; run `scan` again only to pick up sites added to the page since.
 
-Fetching takes a moment (about half a minute for a thousand sites). A feed that can't be reached is skipped and counted on stderr; if none can be reached, `feedscan` exits with an error. Add `--cached` to list the posts saved by the last scan instead: instant, offline, as old as that scan.
+Fetching takes a moment (under a minute for a thousand sites; feeds that share a host are fetched one at a time). A feed that can't be reached is skipped and counted on stderr; if none can be reached, `feedscan` exits with an error. Add `--cached` to list the posts saved by the last scan instead: instant, offline, as old as that scan.
 
 ```
 --checkpoint    checkpoint file to read (repeatable; default: every *.checkpoint.json here)
@@ -92,7 +92,7 @@ Fetching takes a moment (about half a minute for a thousand sites). A feed that 
 --format        output format: json|table (default table)
 ```
 
-These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS`, `FEEDSCAN_EXCLUDE` (comma-separated), `FEEDSCAN_CACHED`, `FEEDSCAN_CONCURRENCY`, `FEEDSCAN_TIMEOUT` and `FEEDSCAN_FORMAT`.
+These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS`, `FEEDSCAN_EXCLUDE` (comma-separated), `FEEDSCAN_CACHED`, `FEEDSCAN_CONCURRENCY`, `FEEDSCAN_TIMEOUT` and `FEEDSCAN_FORMAT`. `scan` reads `FEEDSCAN_CONCURRENCY` and `FEEDSCAN_TIMEOUT` too, so setting them changes both.
 
 ```sh
 # The 10 newest posts:

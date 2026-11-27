@@ -142,3 +142,35 @@ func TestFetchPostsStopsStartingFeedsOnCancel(t *testing.T) {
 		t.Errorf("server hits = %d, want 1 (no feed starts after cancel)", got)
 	}
 }
+
+func TestFetchPostsHonorsConcurrencyAndUserAgent(t *testing.T) {
+	t.Parallel()
+	var inFlight, peak atomic.Int32
+	var agent atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+		}
+		agent.Store(r.UserAgent())
+		time.Sleep(50 * time.Millisecond) // long enough for requests to overlap
+		fmt.Fprint(w, rssFeed("x"))
+	}))
+	defer srv.Close()
+
+	cfg := liveConfig()
+	cfg.Concurrency = 2
+	var feeds []string
+	for i := range 8 {
+		feeds = append(feeds, fmt.Sprintf("%s/%d", srv.URL, i))
+	}
+	if _, failed := FetchPosts(context.Background(), NewHTTPClient(cfg), cfg, feeds); failed != 0 {
+		t.Fatalf("failed = %d, want 0", failed)
+	}
+	if got := peak.Load(); got != 2 {
+		t.Errorf("peak concurrent requests = %d, want 2", got)
+	}
+	if got := agent.Load(); got != DefaultUserAgent {
+		t.Errorf("User-Agent = %v, want %q", got, DefaultUserAgent)
+	}
+}

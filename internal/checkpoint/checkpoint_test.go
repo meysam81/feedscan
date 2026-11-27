@@ -309,7 +309,8 @@ func TestFeedURLs(t *testing.T) {
 	t.Parallel()
 	cp := New()
 	cp.Put(Result{URL: "https://a.example", Status: StatusActive, FeedURL: "https://a.example/feed"})
-	cp.Put(Result{URL: "https://b.example", Status: StatusStale, FeedURL: "https://b.example/rss"})
+	// A feed that failed to parse at scan time may work today: status is no filter.
+	cp.Put(Result{URL: "https://b.example", Status: StatusError, FeedURL: "https://b.example/rss"})
 	cp.Put(Result{URL: "https://c.example", Status: StatusNoFeed})
 
 	got := cp.FeedURLs()
