@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"feedscan/internal/checkpoint"
+	"feedscan/internal/scanner"
 )
 
 // writeCheckpoint saves a checkpoint with one site holding the given posts.
@@ -159,12 +160,25 @@ func TestExcludeHidesHostBeforeLimit(t *testing.T) {
 	}
 }
 
+// trustTestServers makes live fetches accept the certificate that every
+// httptest TLS server shares, for the rest of the test.
+func trustTestServers(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	prev := newHTTPClient
+	newHTTPClient = func(cfg *scanner.Config) *http.Client {
+		c := srv.Client()
+		c.Timeout = cfg.Timeout
+		return c
+	}
+	t.Cleanup(func() { newHTTPClient = prev })
+}
+
 // feedServer serves one RSS item titled after each path ("/alice" → "alice"),
 // and HTTP 500 for paths starting with "/down". hits counts requests.
 func feedServer(t *testing.T) (srv *httptest.Server, hits *atomic.Int32) {
 	t.Helper()
 	hits = new(atomic.Int32)
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		if strings.HasPrefix(r.URL.Path, "/down") {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -176,6 +190,7 @@ func feedServer(t *testing.T) (srv *httptest.Server, hits *atomic.Int32) {
 			name, name, time.Now().Add(-time.Hour).UTC().Format(time.RFC1123Z))
 	}))
 	t.Cleanup(srv.Close)
+	trustTestServers(t, srv)
 	return srv, hits
 }
 
@@ -370,8 +385,9 @@ func TestNetworkFlagsApply(t *testing.T) {
 	dir := t.TempDir()
 	var args []string
 	for i, path := range []string{"/a", "/b", "/slow"} {
-		srv := httptest.NewServer(handler)
+		srv := httptest.NewTLSServer(handler)
 		t.Cleanup(srv.Close)
+		trustTestServers(t, srv)
 		cp := filepath.Join(dir, fmt.Sprintf("%d.checkpoint.json", i))
 		writeSite(t, cp, fmt.Sprintf("https://site%d.example", i), srv.URL+path)
 		args = append(args, "--checkpoint", cp)
@@ -381,7 +397,7 @@ func TestNetworkFlagsApply(t *testing.T) {
 	if err != nil || !strings.Contains(stderr, "1 of 3 feeds failed") {
 		t.Errorf("--timeout 500ms: want the slow feed skipped, got err=%v stderr=%q", err, stderr)
 	}
-	if got := agent.Load(); got != "feedscan/1.0" {
+	if got := agent.Load(); got != scanner.DefaultUserAgent {
 		t.Errorf("User-Agent = %v, want scan's default", got)
 	}
 	if got := peak.Load(); got < 2 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/mmcdole/gofeed"
@@ -15,7 +16,7 @@ import (
 // in no particular order, plus how many feeds could not be fetched or parsed.
 // A failed feed is skipped, never fatal: with hundreds of third-party feeds
 // some are always down. It does no feed discovery; feedURLs come from an
-// earlier scan. cfg supplies Timeout (via client), Concurrency, UserAgent,
+// earlier scan, and one that is not https counts as failed without a request. cfg supplies Timeout (via client), Concurrency, UserAgent,
 // MaxBodyBytes, HostDelay and MaxPosts (the per-feed cap).
 //
 // Once ctx is canceled no new fetch starts; the caller checks ctx.Err() to
@@ -53,6 +54,11 @@ func FetchPosts(ctx context.Context, client *http.Client, cfg *Config, feedURLs 
 
 // fetchFeedPosts fetches and parses one feed.
 func fetchFeedPosts(ctx context.Context, client *http.Client, parser *gofeed.Parser, cfg *Config, feedURL string, hg *hostGate) ([]checkpoint.Post, error) {
+	// The URL comes from a checkpoint file, which may not be one scan wrote.
+	// scan only ever stores https feeds; anything else is not fetched.
+	if !strings.HasPrefix(feedURL, "https://") {
+		return nil, fmt.Errorf("fetch %s: not an https URL", feedURL)
+	}
 	if err := hg.wait(ctx, feedURL); err != nil {
 		return nil, err
 	}

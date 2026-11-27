@@ -25,6 +25,10 @@ import (
 	"feedscan/internal/scanner"
 )
 
+// newHTTPClient builds the client for live fetches. A variable only so tests
+// can trust their own TLS test servers.
+var newHTTPClient = scanner.NewHTTPClient
+
 // checkpointGlob matches the files `feedscan scan` writes by default.
 const checkpointGlob = "*.checkpoint.json"
 
@@ -188,7 +192,7 @@ func fetchLive(ctx context.Context, stderr io.Writer, feedURLs []string, concurr
 		MaxPosts:     math.MaxInt, // nothing is saved, so no per-site cap; --limit caps the list
 	}
 	fmt.Fprintf(stderr, "fetching %d feeds...\n", len(feedURLs))
-	posts, failed := scanner.FetchPosts(ctx, scanner.NewHTTPClient(cfg), cfg, feedURLs)
+	posts, failed := scanner.FetchPosts(ctx, newHTTPClient(cfg), cfg, feedURLs)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
