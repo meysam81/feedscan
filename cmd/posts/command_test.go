@@ -346,9 +346,11 @@ func TestInterruptedLiveRunIsAnErrorWithNoList(t *testing.T) {
 // --timeout and --concurrency must reach the fetcher, not just be validated.
 func TestNetworkFlagsApply(t *testing.T) {
 	var inFlight, peak atomic.Int32
+	var agent atomic.Value
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := inFlight.Add(1)
 		defer inFlight.Add(-1)
+		agent.Store(r.UserAgent())
 		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
 		}
 		delay := 50 * time.Millisecond
@@ -378,6 +380,9 @@ func TestNetworkFlagsApply(t *testing.T) {
 	_, stderr, err := runArgs(t, append(args, "--timeout", "500ms")...)
 	if err != nil || !strings.Contains(stderr, "1 of 3 feeds failed") {
 		t.Errorf("--timeout 500ms: want the slow feed skipped, got err=%v stderr=%q", err, stderr)
+	}
+	if got := agent.Load(); got != "feedscan/1.0" {
+		t.Errorf("User-Agent = %v, want scan's default", got)
 	}
 	if got := peak.Load(); got < 2 {
 		t.Errorf("default concurrency: peak = %d, want feeds fetched in parallel", got)
