@@ -1,5 +1,5 @@
 // Package scan exposes the feedscan scan subcommand: it fetches, probes, and
-// fills the checkpoint that the default posts subcommand reads.
+// fills the checkpoint whose feed URLs the default posts subcommand fetches.
 //
 // Output formatting lives here, not in internal/scanner — the pipeline
 // produces data structures; this Action turns them into bytes.
@@ -134,7 +134,7 @@ func Command() *cli.Command {
 			},
 			&cli.IntFlag{
 				Name:        "max-posts",
-				Usage:       "newest posts to keep per site for the posts list (0 = none)",
+				Usage:       "newest posts to save per site for posts --cached (0 = none)",
 				Value:       50,
 				Sources:     cli.EnvVars("FEEDSCAN_MAX_POSTS"),
 				Destination: &cfg.MaxPosts,
