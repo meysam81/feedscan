@@ -40,6 +40,7 @@ type fetchResult struct {
 	StatusCode  int
 	ContentType string
 	Body        []byte
+	FinalURL    string // after redirects; the base for relative links in Body
 }
 
 // fetch performs a GET with the configured UA and returns the body capped at
@@ -75,5 +76,6 @@ func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string)
 		StatusCode:  resp.StatusCode,
 		ContentType: resp.Header.Get("Content-Type"),
 		Body:        body,
+		FinalURL:    resp.Request.URL.String(),
 	}, nil
 }
