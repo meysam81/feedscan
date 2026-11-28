@@ -64,7 +64,8 @@ Two steps: `scan` finds the sites and their feeds once, the default command list
 # 1. Scan once: find the sites linked from a page and their feeds.
 feedscan scan --url https://example.com/blogroll
 
-# 2. List: the newest posts those sites have published, fetched right now.
+# 2. List: the newest posts those sites have published.
+#    Fetched from their feeds, at most once a day.
 feedscan
 ```
 
@@ -77,22 +78,34 @@ Notes on running a tiny DNS server at home, part …  bob.example/2026/05/notes-
 
 ### Listing posts
 
-`feedscan` (short for `feedscan posts`) reads every `*.checkpoint.json` in the current directory, fetches the feed of every site those scans found, and prints the newest posts first. A post linked from several scans is listed once. The list is always current, however long ago you scanned; run `scan` again only to pick up sites added to the page since.
+`feedscan` (short for `feedscan posts`) reads every `*.checkpoint.json` in the current directory, gets the feed of every site those scans found, and prints the newest posts first. A post linked from several scans is listed once. The list stays current however long ago you scanned; run `scan` again only to pick up sites added to the page since.
 
-Fetching takes a moment (under a minute for a thousand sites; feeds that share a host are fetched one at a time). A feed that can't be reached is skipped and counted on stderr; if none can be reached, `feedscan` exits with an error. Add `--cached` to list the posts saved by the last scan instead: instant, offline, as old as that scan.
+Fetching takes a moment (under a minute for a thousand sites), so what each feed held is remembered for a day:
+
+- `feedscan` fetches only the feeds whose copy is older than `--max-age` (default 24h). Within a day of the last fetch that is none of them: the list is instant, and one line on stderr says how old it is.
+- `feedscan --refresh` fetches every feed now.
+- `feedscan --cached` never touches the network: it lists what is remembered, whatever its age. For a site that was never fetched, that is the posts saved by its scan.
+
+A feed that hasn't changed since the last fetch answers with a short "not modified" instead of the whole feed. A feed that can't be reached keeps the posts of its last successful fetch and is counted on stderr. If no feed can be reached (offline), you get the remembered list with a warning, or an error if nothing is remembered yet.
+
+At most `--per-site` posts (default 3) are listed per scanned site, so one site that publishes all day can't fill the list.
 
 ```
 --checkpoint    checkpoint file to read (repeatable; default: every *.checkpoint.json here)
 --limit, -n     max posts (default 50, 0 = all)
 --days          only posts from the last N days (default 0 = any age)
 --exclude       hide posts from this host and its subdomains (repeatable)
---cached        list the posts saved by the last scan instead of fetching (default false)
+--per-site      max posts per scanned site (default 3, 0 = all)
+--max-age       fetch a feed again once its copy is older than this (default 24h, 0 = always)
+--refresh       fetch every feed now (default false)
+--cached        never fetch; list remembered posts whatever their age (default false)
+--cache-file    where fetched posts are remembered (default: feedscan/posts.json in your cache directory)
 --concurrency   max feeds fetched at once (default 32)
 --timeout       per-feed HTTP timeout (default 10s)
 --format        output format: json|table (default table)
 ```
 
-These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS`, `FEEDSCAN_EXCLUDE` (comma-separated), `FEEDSCAN_CACHED`, `FEEDSCAN_CONCURRENCY`, `FEEDSCAN_TIMEOUT` and `FEEDSCAN_FORMAT`. `scan` reads `FEEDSCAN_CONCURRENCY` and `FEEDSCAN_TIMEOUT` too, so setting them changes both.
+These also read `FEEDSCAN_CHECKPOINT`, `FEEDSCAN_LIMIT`, `FEEDSCAN_POSTS_DAYS`, `FEEDSCAN_EXCLUDE` (comma-separated), `FEEDSCAN_PER_SITE`, `FEEDSCAN_MAX_AGE`, `FEEDSCAN_REFRESH`, `FEEDSCAN_CACHED`, `FEEDSCAN_POSTS_CACHE`, `FEEDSCAN_CONCURRENCY`, `FEEDSCAN_TIMEOUT` and `FEEDSCAN_FORMAT`. `scan` reads `FEEDSCAN_CONCURRENCY` and `FEEDSCAN_TIMEOUT` too, so setting them changes both.
 
 ```sh
 # The 10 newest posts:
@@ -104,8 +117,14 @@ feedscan --days 7 -n 0
 # One source only:
 feedscan --checkpoint 512kb.club.checkpoint.json
 
-# Offline, or in a hurry: the posts as of the last scan:
+# Don't wait for tomorrow: fetch every feed now:
+feedscan --refresh
+
+# Offline: whatever is remembered, however old:
 feedscan --cached
+
+# Every post of every site, not just each site's newest 3:
+feedscan --per-site 0 -n 0
 
 # Hide a site that drowns out the rest (also hides www.example.com, blog.example.com):
 feedscan --exclude example.com --exclude noisy.example.org
@@ -116,6 +135,8 @@ feedscan --format json | jq -r '.[0].url'
 ```
 
 Posts are dated by when they were published, so editing an old post doesn't move it up. Posts without a date, and posts dated more than a day in the future, are left out.
+
+The remembered posts live in one file, `feedscan/posts.json` in your cache directory (`~/.cache` on Linux, `~/Library/Caches` on macOS, `%LocalAppData%` on Windows). Deleting it is safe: the next `feedscan` fetches everything again. Checkpoint files are never changed by listing.
 
 ### Scanning
 
@@ -135,7 +156,7 @@ Common flags for `scan`:
 --no-cache      ignore checkpoint cache
 --verbose       print full result list (default: aggregated summary + top 3)
 --max-urls      cap on extracted URLs to process (0 = unlimited)
---max-posts     newest posts to save per site for feedscan --cached (default 50, 0 = none)
+--max-posts     newest posts to save per site, listed by feedscan --cached until the site is first fetched (default 50, 0 = none)
 --sort-by       sort field: url|status|latest_post|item_count|checked_at (default latest_post)
 --sort-order    sort order: asc|desc (default desc)
 --format        output format: json|table (default json)
@@ -147,7 +168,7 @@ Common flags for `scan`:
 
 Every flag has a `FEEDSCAN_*` env-var equivalent (e.g. `FEEDSCAN_URL`, `FEEDSCAN_CHECKPOINT`).
 
-> **Upgrading from 0.0.x:** a bare `feedscan` now lists posts instead of scanning, also when `FEEDSCAN_URL` is set; scanning always needs the subcommand (`feedscan scan --url example.com`). Listing fetches the feeds live; `feedscan --cached` lists the posts saved at scan time instead, offline.
+> **Upgrading from 0.0.x:** a bare `feedscan` now lists posts instead of scanning, also when `FEEDSCAN_URL` is set; scanning always needs the subcommand (`feedscan scan --url example.com`). Listing fetches the feeds (at most once a day) and shows up to 3 posts per site; `feedscan --cached` lists offline.
 
 ### Examples
 
@@ -260,7 +281,7 @@ Each scanned site has one of four statuses:
 }
 ```
 
-`posts` holds each site's newest posts as of the scan (up to `--max-posts`), newest first; it is what `feedscan --cached` lists and is replaced whenever the site is re-scanned. The live list reads only `feed_url`.
+`posts` holds each site's newest posts as of the scan (up to `--max-posts`), newest first; it is what `feedscan --cached` lists for a site whose feed was never fetched, and is replaced whenever the site is re-scanned. Otherwise listing reads only `feed_url`.
 
 `visited_at` is only set when you run `feedscan cursor mark`; it's UTC RFC3339.
 

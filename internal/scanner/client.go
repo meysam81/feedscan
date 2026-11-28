@@ -41,11 +41,20 @@ type fetchResult struct {
 	ContentType string
 	Body        []byte
 	FinalURL    string // after redirects; the base for relative links in Body
+	// Validators for a later conditional request; empty when the server sent none.
+	ETag         string
+	LastModified string
 }
 
 // fetch performs a GET with the configured UA and returns the body capped at
 // MaxBodyBytes.
-func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string) (res *fetchResult, err error) {
+func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string) (*fetchResult, error) {
+	return fetchWith(ctx, client, cfg, rawURL, nil)
+}
+
+// fetchWith is fetch plus per-request headers (conditional-request
+// validators), which win over the defaults and cfg.Headers.
+func fetchWith(ctx context.Context, client *http.Client, cfg *Config, rawURL string, extra http.Header) (res *fetchResult, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -57,6 +66,9 @@ func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string)
 	}
 	if host := cfg.Headers.Get("Host"); host != "" {
 		req.Host = host
+	}
+	for name, values := range extra {
+		req.Header[http.CanonicalHeaderKey(name)] = values
 	}
 
 	resp, err := client.Do(req)
@@ -73,9 +85,11 @@ func fetch(ctx context.Context, client *http.Client, cfg *Config, rawURL string)
 		return nil, err
 	}
 	return &fetchResult{
-		StatusCode:  resp.StatusCode,
-		ContentType: resp.Header.Get("Content-Type"),
-		Body:        body,
-		FinalURL:    resp.Request.URL.String(),
+		StatusCode:   resp.StatusCode,
+		ContentType:  resp.Header.Get("Content-Type"),
+		Body:         body,
+		FinalURL:     resp.Request.URL.String(),
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
 	}, nil
 }

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"feedscan/internal/checkpoint"
 )
 
 // rssFeed renders a minimal RSS document with one dated item per title.
@@ -30,6 +32,22 @@ func liveConfig() *Config {
 		MaxBodyBytes: DefaultMaxBodyBytes,
 		MaxPosts:     math.MaxInt,
 	}
+}
+
+// fetchAll fetches urls with no validators and flattens the results the way
+// a caller without a cache would: all posts, and how many feeds failed.
+func fetchAll(ctx context.Context, client *http.Client, cfg *Config, urls []string) (posts []checkpoint.Post, failed int) {
+	reqs := make([]FeedRequest, len(urls))
+	for i, u := range urls {
+		reqs[i] = FeedRequest{URL: u}
+	}
+	for _, r := range FetchFeeds(ctx, client, cfg, reqs, nil) {
+		if r.Err != nil {
+			failed++
+		}
+		posts = append(posts, r.Posts...)
+	}
+	return posts, failed
 }
 
 // tlsClient trusts the test servers' certificate (they all share one) and
@@ -61,7 +79,7 @@ func TestFetchPostsMergesFeedsAndCountsFailures(t *testing.T) {
 
 	cfg := liveConfig()
 	feeds := []string{srv.URL + "/a.xml", srv.URL + "/b.xml", srv.URL + "/junk.xml", srv.URL + "/500.xml"}
-	posts, failed := FetchPosts(context.Background(), tlsClient(srv, cfg), cfg, feeds)
+	posts, failed := fetchAll(context.Background(), tlsClient(srv, cfg), cfg, feeds)
 
 	if failed != 2 {
 		t.Errorf("failed = %d, want 2 (junk + 500)", failed)
@@ -96,7 +114,7 @@ func TestFetchPostsResolvesLinksAgainstRedirectTarget(t *testing.T) {
 	defer old.Close()
 
 	cfg := liveConfig()
-	posts, failed := FetchPosts(context.Background(), tlsClient(old, cfg), cfg, []string{old.URL + "/feed.xml"})
+	posts, failed := fetchAll(context.Background(), tlsClient(old, cfg), cfg, []string{old.URL + "/feed.xml"})
 	if failed != 0 || len(posts) != 1 {
 		t.Fatalf("got %d posts, %d failed; want 1, 0", len(posts), failed)
 	}
@@ -115,7 +133,7 @@ func TestFetchPostsSpacesRequestsToOneHost(t *testing.T) {
 	cfg := liveConfig()
 	cfg.HostDelay = 100 * time.Millisecond
 	start := time.Now()
-	FetchPosts(context.Background(), tlsClient(srv, cfg), cfg, []string{srv.URL + "/1", srv.URL + "/2"})
+	fetchAll(context.Background(), tlsClient(srv, cfg), cfg, []string{srv.URL + "/1", srv.URL + "/2"})
 	if elapsed := time.Since(start); elapsed < cfg.HostDelay {
 		t.Errorf("two feeds on one host took %v, want >= %v", elapsed, cfg.HostDelay)
 	}
@@ -139,7 +157,7 @@ func TestFetchPostsStopsStartingFeedsOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		FetchPosts(ctx, tlsClient(srv, cfg), cfg, feeds)
+		fetchAll(ctx, tlsClient(srv, cfg), cfg, feeds)
 	}()
 	select {
 	case <-done:
@@ -172,7 +190,7 @@ func TestFetchPostsHonorsConcurrencyAndUserAgent(t *testing.T) {
 	for i := range 8 {
 		feeds = append(feeds, fmt.Sprintf("%s/%d", srv.URL, i))
 	}
-	if _, failed := FetchPosts(context.Background(), tlsClient(srv, cfg), cfg, feeds); failed != 0 {
+	if _, failed := fetchAll(context.Background(), tlsClient(srv, cfg), cfg, feeds); failed != 0 {
 		t.Fatalf("failed = %d, want 0", failed)
 	}
 	if got := peak.Load(); got != 2 {
@@ -195,8 +213,63 @@ func TestFetchPostsRefusesNonHTTPS(t *testing.T) {
 	defer srv.Close()
 
 	cfg := liveConfig()
-	posts, failed := FetchPosts(context.Background(), srv.Client(), cfg, []string{srv.URL + "/feed", "file:///etc/passwd"})
+	posts, failed := fetchAll(context.Background(), srv.Client(), cfg, []string{srv.URL + "/feed", "file:///etc/passwd"})
 	if len(posts) != 0 || failed != 2 || hits.Load() != 0 {
 		t.Errorf("got %d posts, %d failed, %d requests; want 0, 2, 0", len(posts), failed, hits.Load())
+	}
+}
+
+// A feed that has not changed since the caller's copy answers 304: no body,
+// no posts, and not a failure. A changed feed comes back whole with new
+// validators.
+func TestFetchFeedsConditionalRequests(t *testing.T) {
+	t.Parallel()
+	const etag, modified = `"v1"`, "Sat, 21 Nov 2026 00:00:00 GMT"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/unprompted":
+			w.WriteHeader(http.StatusNotModified) // nobody asked: there is no copy to keep
+		case r.Header.Get("If-None-Match") == etag || r.Header.Get("If-Modified-Since") == modified:
+			w.WriteHeader(http.StatusNotModified)
+		default:
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Last-Modified", modified)
+			fmt.Fprint(w, rssFeed("p1"))
+		}
+	}))
+	defer srv.Close()
+
+	var done atomic.Int32
+	cfg := liveConfig()
+	got := FetchFeeds(context.Background(), tlsClient(srv, cfg), cfg, []FeedRequest{
+		{URL: srv.URL + "/first-time"},
+		{URL: srv.URL + "/by-etag", ETag: etag},
+		{URL: srv.URL + "/by-date", LastModified: modified},
+		{URL: srv.URL + "/changed", ETag: `"v0"`},
+		{URL: srv.URL + "/unprompted"},
+	}, func() { done.Add(1) })
+
+	if len(got) != 5 || done.Load() != 5 {
+		t.Fatalf("got %d results, %d onDone calls; want 5 and 5", len(got), done.Load())
+	}
+	for i, want := range []struct {
+		path        string
+		posts       int
+		notModified bool
+		failed      bool
+	}{
+		{"/first-time", 1, false, false},
+		{"/by-etag", 0, true, false},
+		{"/by-date", 0, true, false},
+		{"/changed", 1, false, false},
+		{"/unprompted", 0, false, true},
+	} {
+		r := got[i]
+		if r.URL != srv.URL+want.path || len(r.Posts) != want.posts || r.NotModified != want.notModified || (r.Err != nil) != want.failed {
+			t.Errorf("%s: got url=%q posts=%d notModified=%v err=%v", want.path, r.URL, len(r.Posts), r.NotModified, r.Err)
+		}
+	}
+	if r := got[0]; r.ETag != etag || r.LastModified != modified {
+		t.Errorf("validators not returned: etag=%q last-modified=%q", r.ETag, r.LastModified)
 	}
 }

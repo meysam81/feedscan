@@ -148,27 +148,16 @@ func (c *Checkpoint) Put(r Result) {
 	c.Entries[r.URL] = r
 }
 
-// AllPosts returns every site's posts as one flat slice, in no particular
-// order. The caller may sort/filter freely without holding the lock.
-func (c *Checkpoint) AllPosts() []Post {
+// Feeds returns the feed URL of every site a scan found a feed for, mapped to
+// the posts saved for it at scan time (none, for a checkpoint written before
+// posts were saved). Two sites sharing a feed share an entry.
+func (c *Checkpoint) Feeds() map[string][]Post {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var out []Post
-	for _, posts := range c.Posts {
-		out = append(out, posts...)
-	}
-	return out
-}
-
-// FeedURLs returns the feed URL of every site a scan found a feed for, in no
-// particular order. The same feed may appear twice when two sites share it.
-func (c *Checkpoint) FeedURLs() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []string
-	for _, r := range c.Entries {
+	out := make(map[string][]Post)
+	for u, r := range c.Entries {
 		if r.FeedURL != "" {
-			out = append(out, r.FeedURL)
+			out[r.FeedURL] = append(out[r.FeedURL], c.Posts[u]...)
 		}
 	}
 	return out
@@ -272,18 +261,26 @@ func (c *Checkpoint) Stats() Stats {
 func (c *Checkpoint) Save(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return WriteFileAtomic(path, func(w io.Writer) error {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(c)
+	})
+}
 
+// WriteFileAtomic replaces path with whatever write produces, via a temp file
+// in the same directory and a rename: a reader, or a crash, never sees a
+// half-written file. Creates the parent directory if missing.
+func WriteFileAtomic(path string, write func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".feedscan.checkpoint.*.tmp")
+	tmp, err := os.CreateTemp(dir, ".feedscan.*.tmp")
 	if err != nil {
 		return err
 	}
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(c); err != nil {
+	if err := write(tmp); err != nil {
 		return errors.Join(err, tmp.Close(), os.Remove(tmp.Name()))
 	}
 	if err := tmp.Close(); err != nil {

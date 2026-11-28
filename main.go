@@ -1,10 +1,10 @@
 // Command feedscan lists the newest blog posts published by the sites linked
 // from a page. The "scan" subcommand fetches a URL, extracts external HTTPS
 // links, probes each for an RSS/Atom feed, and remembers the feeds; the
-// default "posts" subcommand fetches those feeds and prints their posts
-// newest first (--cached prints the posts saved at scan time). A per-checkpoint
-// reading cursor (mark, unmark, unread, history, stats) lives under the
-// "cursor" subcommand.
+// default "posts" subcommand lists the feeds' posts newest first, fetching each
+// feed at most once a day (--refresh fetches now, --cached never does). A
+// per-checkpoint reading cursor (mark, unmark, unread, history, stats) lives
+// under the "cursor" subcommand.
 //
 // Design notes:
 //   - Checkpoints are keyed by external URL (not by run), so unrelated runs

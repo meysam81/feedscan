@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,21 @@ import (
 	"feedscan/internal/checkpoint"
 )
 
+// TestMain keeps every command built here away from the real posts cache,
+// including one a test forgets to give a --cache-file.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "feedscan-test")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("FEEDSCAN_POSTS_CACHE", filepath.Join(dir, "posts.json")); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // The root command lists posts and owns the posts flags, some of which share
 // a name with scan/cursor flags. This pins both halves: the bare command takes
 // flags, and the subcommands still get their own.
@@ -18,7 +34,7 @@ func TestRootListsPostsAndSubcommandsKeepTheirFlags(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.checkpoint.json")
 	now := time.Now()
 	cp := checkpoint.New()
-	cp.Put(checkpoint.Result{URL: "https://a.example", CheckedAt: &now, Posts: []checkpoint.Post{
+	cp.Put(checkpoint.Result{URL: "https://a.example", FeedURL: "https://a.example/feed", CheckedAt: &now, Posts: []checkpoint.Post{
 		{Title: "Newer", URL: "https://a.example/newer", Date: now.Add(-time.Hour)},
 		{Title: "Older", URL: "https://a.example/older", Date: now.Add(-48 * time.Hour)},
 	}})
@@ -29,7 +45,7 @@ func TestRootListsPostsAndSubcommandsKeepTheirFlags(t *testing.T) {
 	var out bytes.Buffer
 	root := newRoot()
 	root.Writer = &out
-	if err := root.Run(context.Background(), []string{"feedscan", "--cached", "--checkpoint", path, "-n", "1"}); err != nil {
+	if err := root.Run(context.Background(), []string{"feedscan", "--cached", "--cache-file", filepath.Join(t.TempDir(), "posts.json"), "--checkpoint", path, "-n", "1"}); err != nil {
 		t.Fatalf("bare feedscan with flags: %v", err)
 	}
 	if got := out.String(); !strings.Contains(got, "Newer") || strings.Contains(got, "Older") {
