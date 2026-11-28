@@ -214,33 +214,45 @@ func Command() *cli.Command {
 			if !cached {
 				for _, u := range feedURLs {
 					f, known := cache.Feeds[u]
-					if refresh || !known || now.Sub(f.FetchedAt) >= maxAge {
+					// A fetch time in the future (a clock set back since) says
+					// nothing about the copy's age: fetch.
+					if refresh || !known || f.FetchedAt.After(now) || now.Sub(f.FetchedAt) >= maxAge {
 						due = append(due, scanner.FeedRequest{URL: u, ETag: f.ETag, LastModified: f.LastModified})
 					}
 				}
 			}
-			offline := false
+			allFailed, offline := false, false
 			if len(due) > 0 {
 				results, err := fetchLive(ctx, stderr, due, concurrency, timeout)
 				if err != nil {
 					return err
 				}
-				failed := 0
+				failed, answered := 0, 0
 				for _, r := range results {
 					if r.Err != nil {
 						failed++
 					}
+					if r.Err == nil || r.Answered {
+						answered++
+					}
 				}
-				// Every feed failing is no network, not a thousand broken sites.
-				// The cache is left as it was, so the next run tries again at once.
-				if offline = failed == len(due); !offline {
+				allFailed = failed == len(due)
+				// Not one server answering is no network, not a thousand broken
+				// sites. The cache is left as it was, so the next run tries again
+				// at once instead of waiting out --max-age.
+				if offline = answered == 0; !offline {
 					for _, r := range results {
 						f := cache.Feeds[r.URL]
 						f.FetchedAt = now
-						if r.Err == nil && !r.NotModified {
+						switch {
+						case r.Err != nil:
+							// A failed feed keeps the posts of its last good fetch,
+							// but not the validators: if they were what broke the
+							// request, the next one must go without.
+							f.ETag, f.LastModified = "", ""
+						case !r.NotModified:
 							f.Posts, f.ETag, f.LastModified = r.Posts, r.ETag, r.LastModified
 						}
-						// A failed feed keeps the posts of its last good fetch.
 						cache.Feeds[r.URL] = f
 					}
 					if err := cache.Save(cacheFile); err != nil {
@@ -260,13 +272,11 @@ func Command() *cli.Command {
 			for _, u := range feedURLs {
 				f, known := cache.Feeds[u]
 				posts := f.Posts
-				switch {
-				case known:
-					if oldest.IsZero() || f.FetchedAt.Before(oldest) {
-						oldest = f.FetchedAt
-					}
-				case cached:
-					posts = scanned[u] // never fetched: what the scan saw is all there is
+				if cached && len(posts) == 0 {
+					posts = scanned[u] // never fetched with success: what the scan saw is all there is
+				}
+				if known && (oldest.IsZero() || f.FetchedAt.Before(oldest)) {
+					oldest = f.FetchedAt
 				}
 				have += len(posts)
 				// The per-site cap applies to what would be listed, hence after the filters.
@@ -276,13 +286,15 @@ func Command() *cli.Command {
 			switch {
 			case len(feedURLs) == 0:
 				fmt.Fprintln(stderr, "no feeds found by earlier scans; run `feedscan scan --url <page>` to find some")
-			case offline && have == 0:
+			case allFailed && have == 0:
 				// An empty list would pass for "nothing new".
-				return fmt.Errorf("all %d feeds failed (offline?) and none of their posts are cached; --cached lists the posts saved by the last scan", len(due))
+				return fmt.Errorf("all %d feeds failed and none of their posts are cached; --cached lists the posts saved by the last scan", len(due))
 			case offline:
-				fmt.Fprintf(stderr, "all %d feeds failed (offline?); listing cached posts, some from %s ago\n", len(due), age(now.Sub(oldest)))
+				fmt.Fprintf(stderr, "no feed could be reached (offline?); listing cached posts, some from %s ago\n", age(now.Sub(oldest)))
 			case cached && have == 0:
 				fmt.Fprintln(stderr, "no posts cached yet; run `feedscan` without --cached to fetch them")
+			case cached && !oldest.IsZero():
+				fmt.Fprintf(stderr, "posts as of %s ago\n", age(now.Sub(oldest)))
 			case len(due) == 0 && !oldest.IsZero():
 				fmt.Fprintf(stderr, "posts as of %s ago; --refresh to fetch now\n", age(now.Sub(oldest)))
 			}
@@ -350,6 +362,8 @@ func isTerminal(w io.Writer) bool {
 // age renders how long ago something was, coarsely: "5m", "3h", "2d".
 func age(d time.Duration) string {
 	switch {
+	case d < time.Minute: // including a fetch time in the future
+		return "moments"
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 48*time.Hour:

@@ -22,8 +22,10 @@ type FeedRequest struct {
 }
 
 // FeedResult is the outcome for one FeedRequest. Exactly one of these holds:
-// Err is set (nothing else is), NotModified is true (the caller's copy is
-// current), or Posts with the feed's new validators are filled in.
+// Err is set, NotModified is true (the caller's copy is current), or Posts
+// with the feed's new validators are filled in. With Err, Answered tells a
+// broken feed (its server replied, just not with a feed) from an unreachable
+// one, which is all a caller without a network ever sees.
 type FeedResult struct {
 	URL          string
 	Posts        []checkpoint.Post
@@ -31,6 +33,7 @@ type FeedResult struct {
 	LastModified string
 	NotModified  bool
 	Err          error
+	Answered     bool
 }
 
 // FetchFeeds fetches every requested feed once and returns one result per
@@ -98,11 +101,11 @@ func fetchFeed(ctx context.Context, client *http.Client, parser *gofeed.Parser, 
 		return FeedResult{URL: req.URL, NotModified: true}
 	}
 	if res.StatusCode >= 400 {
-		return failed(fmt.Errorf("fetch %s: HTTP %d", req.URL, res.StatusCode))
+		return FeedResult{URL: req.URL, Answered: true, Err: fmt.Errorf("fetch %s: HTTP %d", req.URL, res.StatusCode)}
 	}
 	feed, err := parser.ParseString(string(res.Body))
 	if err != nil {
-		return failed(fmt.Errorf("parse %s: %w", req.URL, err))
+		return FeedResult{URL: req.URL, Answered: true, Err: fmt.Errorf("parse %s: %w", req.URL, err)}
 	}
 	return FeedResult{
 		URL:          req.URL,

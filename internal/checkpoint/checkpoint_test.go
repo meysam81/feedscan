@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// allPosts flattens every site's saved posts.
+func allPosts(c *Checkpoint) []Post {
+	var out []Post
+	for _, posts := range c.Posts {
+		out = append(out, posts...)
+	}
+	return out
+}
+
 func ptrTime(t time.Time) *time.Time { return &t }
 
 func seed(t *testing.T) *Checkpoint {
@@ -271,7 +280,7 @@ func TestPostsStoredBesideEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := loaded.AllPosts(); len(got) != 1 || got[0] != post {
+	if got := allPosts(loaded); len(got) != 1 || got[0] != post {
 		t.Fatalf("posts not preserved across save/load: %+v", got)
 	}
 	// Entries (what scan and cursor print) must stay free of posts.
@@ -283,7 +292,7 @@ func TestPostsStoredBesideEntries(t *testing.T) {
 
 	// A re-probe that finds no posts clears the site's old ones.
 	loaded.Put(Result{URL: "https://a.example", Status: StatusError, CheckedAt: &now})
-	if got := loaded.AllPosts(); len(got) != 0 {
+	if got := allPosts(loaded); len(got) != 0 {
 		t.Fatalf("stale posts kept after re-probe: %+v", got)
 	}
 }
@@ -299,7 +308,7 @@ func TestLoadCheckpointWithoutPosts(t *testing.T) {
 	}
 	// Put on a pre-posts checkpoint must not panic on a nil map.
 	cp.Put(Result{URL: "https://a.example", Posts: []Post{{URL: "https://a.example/p"}}})
-	if got := cp.AllPosts(); len(got) != 1 {
+	if got := allPosts(cp); len(got) != 1 {
 		t.Fatalf("got %d posts, want 1", len(got))
 	}
 }

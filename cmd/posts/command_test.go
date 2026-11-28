@@ -477,7 +477,7 @@ func TestCacheIsReusedUntilMaxAge(t *testing.T) {
 	if second != first {
 		t.Errorf("cached list differs from the fetched one:\n%s\nvs\n%s", second, first)
 	}
-	if !strings.Contains(stderr, "posts as of 0m ago; --refresh to fetch now") {
+	if !strings.Contains(stderr, "posts as of moments ago; --refresh to fetch now") {
 		t.Errorf("stderr must say the list is cached and how old, got %q", stderr)
 	}
 
@@ -531,9 +531,14 @@ func TestFailedFeedKeepsItsCachedPostsAndIsNotRetriedAtOnce(t *testing.T) {
 	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
 	writeSite(t, a, "https://alice.example", srv.URL+"/alice")
 	writeSite(t, b, "https://bob.example", srv.URL+"/down")
+	c := filepath.Join(dir, "c.checkpoint.json")
+	writeSite(t, c, "https://carol.example", srv.URL+"/carol") // fresh: not part of this fetch
 	cache := filepath.Join(dir, "posts.json")
-	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/down": cachedFeed("bob-before-the-outage", 25*time.Hour)})
-	args := []string{"--checkpoint", a, "--checkpoint", b, "--cache-file", cache}
+	writeCache(t, cache, map[string]postcache.Feed{
+		srv.URL + "/down":  cachedFeed("bob-before-the-outage", 25*time.Hour),
+		srv.URL + "/carol": cachedFeed("fresh-carol", time.Hour),
+	})
+	args := []string{"--checkpoint", a, "--checkpoint", b, "--checkpoint", c, "--cache-file", cache}
 
 	out, stderr, err := runArgs(t, args...)
 	if err != nil {
@@ -543,7 +548,7 @@ func TestFailedFeedKeepsItsCachedPostsAndIsNotRetriedAtOnce(t *testing.T) {
 		t.Errorf("want alice's live post and bob's cached one:\n%s", out)
 	}
 	if !strings.Contains(stderr, "1 of 2 feeds failed") {
-		t.Errorf("stderr = %q, want the failure count", stderr)
+		t.Errorf("stderr = %q, want the failure count out of the feeds fetched", stderr)
 	}
 
 	before := hits.Load()
@@ -552,12 +557,21 @@ func TestFailedFeedKeepsItsCachedPostsAndIsNotRetriedAtOnce(t *testing.T) {
 	}
 }
 
+// unreachable returns an https URL nothing listens on: what every feed looks
+// like without a network.
+func unreachable(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL
+}
+
 func TestOfflineListsTheCacheAndLeavesItAlone(t *testing.T) {
-	srv, _ := feedServer(t)
+	gone := unreachable(t)
 	dir := t.TempDir()
 	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
-	writeSite(t, cp, "https://bob.example", srv.URL+"/down")
-	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/down": cachedFeed("from-three-days-ago", 72*time.Hour)})
+	writeSite(t, cp, "https://bob.example", gone+"/feed")
+	writeCache(t, cache, map[string]postcache.Feed{gone + "/feed": cachedFeed("from-three-days-ago", 72*time.Hour)})
 	before, err := os.ReadFile(cache)
 	if err != nil {
 		t.Fatal(err)
@@ -570,12 +584,141 @@ func TestOfflineListsTheCacheAndLeavesItAlone(t *testing.T) {
 	if !strings.Contains(out, "from-three-days-ago") {
 		t.Errorf("list lacks the cached post:\n%s", out)
 	}
-	if !strings.Contains(stderr, "all 1 feeds failed") || !strings.Contains(stderr, "3d ago") {
+	if !strings.Contains(stderr, "no feed could be reached") || !strings.Contains(stderr, "3d ago") {
 		t.Errorf("stderr must say nothing was fetched and how old the list is, got %q", stderr)
 	}
 	// Otherwise coming back online would wait a day before trying again.
 	if after, _ := os.ReadFile(cache); !bytes.Equal(before, after) {
-		t.Error("a run where every feed failed must not rewrite the cache")
+		t.Error("a run where no feed could be reached must not rewrite the cache")
+	}
+
+	// Offline with nothing cached: an error, not an empty list.
+	if out, _, err := runArgs(t, "--checkpoint", cp); err == nil || out != "" {
+		t.Errorf("want an error and no list, got err=%v out=%q", err, out)
+	}
+}
+
+// One broken site is not a missing network: it must wait for --max-age like
+// any other feed, even when it is the only one due.
+func TestBrokenFeedIsNotMistakenForOffline(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://bob.example", srv.URL+"/down")
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/down": cachedFeed("bob-before-the-outage", 25*time.Hour)})
+	args := []string{"--checkpoint", cp, "--cache-file", cache}
+
+	out, stderr, err := runArgs(t, args...)
+	if err != nil || !strings.Contains(out, "bob-before-the-outage") {
+		t.Fatalf("err=%v, want bob's cached post:\n%s", err, out)
+	}
+	if !strings.Contains(stderr, "1 of 1 feeds failed") || strings.Contains(stderr, "offline") {
+		t.Errorf("stderr = %q, want a plain failure count", stderr)
+	}
+	if _, _, err := runArgs(t, args...); err != nil || hits.Load() != 1 {
+		t.Errorf("next run: err=%v, %d requests in total; want 1 (not retried until --max-age)", err, hits.Load())
+	}
+}
+
+func TestFetchTimeInTheFutureIsDue(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://alice.example", srv.URL+"/alice")
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/alice": cachedFeed("from-the-future", -48*time.Hour)})
+
+	out, _, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache)
+	if err != nil || hits.Load() != 1 || !strings.Contains(out, "live alice") {
+		t.Errorf("a copy stamped in the future must be fetched again: err=%v hits=%d\n%s", err, hits.Load(), out)
+	}
+}
+
+func TestCachedFallsBackToTheScanAfterAFailedFirstFetch(t *testing.T) {
+	srv, _ := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://bob.example", srv.URL+"/down")
+	args := []string{"--checkpoint", cp, "--cache-file", cache}
+
+	if _, _, err := runArgs(t, args...); err == nil || !strings.Contains(err.Error(), "--cached") {
+		t.Fatalf("every feed failing with nothing cached must be an error pointing at --cached, got %v", err)
+	}
+	out, _, err := runArgs(t, append(args, "--cached")...)
+	if err != nil || !strings.Contains(out, "bob.example/saved") {
+		t.Errorf("--cached must still list what the scan saved: err=%v\n%s", err, out)
+	}
+}
+
+// Validators that make a request fail (a damaged cache file) must not be
+// sent forever.
+func TestFailedFeedForgetsItsValidators(t *testing.T) {
+	srv, _ := feedServer(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
+	writeSite(t, a, "https://alice.example", srv.URL+"/alice")
+	writeSite(t, b, "https://bob.example", srv.URL+"/bob")
+	cache := filepath.Join(dir, "posts.json")
+	damaged := cachedFeed("alice-before", 25*time.Hour)
+	damaged.ETag = "not\r\na header value"
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/alice": damaged})
+	args := []string{"--checkpoint", a, "--checkpoint", b, "--cache-file", cache, "--refresh"}
+
+	out, stderr, err := runArgs(t, args...)
+	if err != nil || !strings.Contains(stderr, "1 of 2 feeds failed") || !strings.Contains(out, "alice-before") {
+		t.Fatalf("first run: err=%v stderr=%q\n%s", err, stderr, out)
+	}
+	out, stderr, err = runArgs(t, args...)
+	if err != nil || strings.Contains(stderr, "failed") || !strings.Contains(out, "live alice") {
+		t.Errorf("second run must fetch alice without the bad validator: err=%v stderr=%q\n%s", err, stderr, out)
+	}
+}
+
+func TestFreshnessLineShowsTheOldestFeed(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
+	writeSite(t, a, "https://alice.example", "https://alice.example/feed")
+	writeSite(t, b, "https://bob.example", "https://bob.example/feed")
+	cache := filepath.Join(dir, "posts.json")
+	writeCache(t, cache, map[string]postcache.Feed{
+		"https://alice.example/feed": cachedFeed("alice", time.Hour+time.Minute),
+		"https://bob.example/feed":   cachedFeed("bob", 5*time.Hour+time.Minute),
+	})
+
+	_, stderr, err := runArgs(t, "--checkpoint", a, "--checkpoint", b, "--cache-file", cache)
+	if err != nil || !strings.Contains(stderr, "posts as of 5h ago; --refresh to fetch now") {
+		t.Errorf("err=%v stderr=%q, want the age of the oldest copy", err, stderr)
+	}
+	// --cached and --refresh contradict each other, so --cached doesn't suggest it.
+	_, stderr, err = runArgs(t, "--cached", "--checkpoint", a, "--checkpoint", b, "--cache-file", cache)
+	if err != nil || !strings.Contains(stderr, "posts as of 5h ago") || strings.Contains(stderr, "--refresh") {
+		t.Errorf("--cached: err=%v stderr=%q", err, stderr)
+	}
+}
+
+// The per-site cap counts posts that would be listed: a site's hidden or
+// too-old posts must not use it up.
+func TestPerSiteCapAppliesAfterTheFilters(t *testing.T) {
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://alice.example", "https://alice.example/feed")
+	ago := func(d time.Duration) time.Time { return time.Now().Add(-d) }
+	writeCache(t, cache, map[string]postcache.Feed{"https://alice.example/feed": {
+		FetchedAt: time.Now(),
+		Posts: []checkpoint.Post{
+			{Title: "linked 1", URL: "https://noisy.example/1", Date: ago(1 * time.Hour)},
+			{Title: "linked 2", URL: "https://noisy.example/2", Date: ago(2 * time.Hour)},
+			{Title: "linked 3", URL: "https://noisy.example/3", Date: ago(3 * time.Hour)},
+			{Title: "own 1", URL: "https://alice.example/1", Date: ago(4 * time.Hour)},
+			{Title: "own 2", URL: "https://alice.example/2", Date: ago(5 * time.Hour)},
+		},
+	}})
+
+	out, _, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache, "--exclude", "noisy.example")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := rows(t, out); len(got) != 2 || !strings.HasPrefix(got[0], "own 1") {
+		t.Errorf("want alice's two own posts, got %q", got)
 	}
 }
 
@@ -747,7 +890,7 @@ func TestProgress(t *testing.T) {
 
 func TestAge(t *testing.T) {
 	for d, want := range map[time.Duration]string{
-		30 * time.Second: "0m", 59 * time.Minute: "59m", 3 * time.Hour: "3h", 47 * time.Hour: "47h", 72 * time.Hour: "3d",
+		-5 * time.Minute: "moments", 30 * time.Second: "moments", 59 * time.Minute: "59m", 3 * time.Hour: "3h", 47 * time.Hour: "47h", 72 * time.Hour: "3d",
 	} {
 		if got := age(d); got != want {
 			t.Errorf("age(%v) = %q, want %q", d, got, want)

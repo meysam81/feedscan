@@ -148,18 +148,6 @@ func (c *Checkpoint) Put(r Result) {
 	c.Entries[r.URL] = r
 }
 
-// AllPosts returns every site's posts as one flat slice, in no particular
-// order. The caller may sort/filter freely without holding the lock.
-func (c *Checkpoint) AllPosts() []Post {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []Post
-	for _, posts := range c.Posts {
-		out = append(out, posts...)
-	}
-	return out
-}
-
 // Feeds returns the feed URL of every site a scan found a feed for, mapped to
 // the posts saved for it at scan time (none, for a checkpoint written before
 // posts were saved). Two sites sharing a feed share an entry.

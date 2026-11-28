@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,21 @@ import (
 
 	"feedscan/internal/checkpoint"
 )
+
+// TestMain keeps every command built here away from the real posts cache,
+// including one a test forgets to give a --cache-file.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "feedscan-test")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("FEEDSCAN_POSTS_CACHE", filepath.Join(dir, "posts.json")); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // The root command lists posts and owns the posts flags, some of which share
 // a name with scan/cursor flags. This pins both halves: the bare command takes
