@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 )
@@ -301,5 +302,21 @@ func TestLoadCheckpointWithoutPosts(t *testing.T) {
 	cp.Put(Result{URL: "https://a.example", Posts: []Post{{URL: "https://a.example/p"}}})
 	if got := cp.AllPosts(); len(got) != 1 {
 		t.Fatalf("got %d posts, want 1", len(got))
+	}
+}
+
+func TestFeedURLs(t *testing.T) {
+	t.Parallel()
+	cp := New()
+	cp.Put(Result{URL: "https://a.example", Status: StatusActive, FeedURL: "https://a.example/feed"})
+	// A feed that failed to parse at scan time may work today: status is no filter.
+	cp.Put(Result{URL: "https://b.example", Status: StatusError, FeedURL: "https://b.example/rss"})
+	cp.Put(Result{URL: "https://c.example", Status: StatusNoFeed})
+
+	got := cp.FeedURLs()
+	sort.Strings(got)
+	want := []string{"https://a.example/feed", "https://b.example/rss"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

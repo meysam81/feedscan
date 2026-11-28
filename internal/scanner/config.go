@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+// Defaults shared by scan (as flag defaults) and by the live posts listing
+// (which does not expose these knobs).
+const (
+	DefaultUserAgent          = "feedscan/1.0"
+	DefaultMaxBodyBytes int64 = 10 << 20
+	DefaultHostDelay          = 500 * time.Millisecond
+	DefaultTimeout            = 10 * time.Second
+)
+
 // Config holds pipeline tunables. CLI-only concerns (sort key, output format,
 // verbosity) live in cmd/scan — they're not pipeline inputs.
 type Config struct {

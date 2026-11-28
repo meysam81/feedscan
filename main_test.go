@@ -29,7 +29,7 @@ func TestRootListsPostsAndSubcommandsKeepTheirFlags(t *testing.T) {
 	var out bytes.Buffer
 	root := newRoot()
 	root.Writer = &out
-	if err := root.Run(context.Background(), []string{"feedscan", "--checkpoint", path, "-n", "1"}); err != nil {
+	if err := root.Run(context.Background(), []string{"feedscan", "--cached", "--checkpoint", path, "-n", "1"}); err != nil {
 		t.Fatalf("bare feedscan with flags: %v", err)
 	}
 	if got := out.String(); !strings.Contains(got, "Newer") || strings.Contains(got, "Older") {

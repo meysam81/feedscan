@@ -1,5 +1,5 @@
 // Package scan exposes the feedscan scan subcommand: it fetches, probes, and
-// fills the checkpoint that the default posts subcommand reads.
+// fills the checkpoint whose feed URLs the default posts subcommand fetches.
 //
 // Output formatting lives here, not in internal/scanner — the pipeline
 // produces data structures; this Action turns them into bytes.
@@ -61,7 +61,7 @@ func Command() *cli.Command {
 			&cli.DurationFlag{
 				Name:        "timeout",
 				Usage:       "per-request HTTP timeout",
-				Value:       10 * time.Second,
+				Value:       scanner.DefaultTimeout,
 				Sources:     cli.EnvVars("FEEDSCAN_TIMEOUT"),
 				Destination: &cfg.Timeout,
 			},
@@ -90,21 +90,21 @@ func Command() *cli.Command {
 			&cli.StringFlag{
 				Name:        "user-agent",
 				Usage:       "HTTP User-Agent",
-				Value:       "feedscan/1.0",
+				Value:       scanner.DefaultUserAgent,
 				Sources:     cli.EnvVars("FEEDSCAN_USER_AGENT"),
 				Destination: &cfg.UserAgent,
 			},
 			&cli.Int64Flag{
 				Name:        "max-body",
 				Usage:       "max response body bytes",
-				Value:       10 << 20,
+				Value:       scanner.DefaultMaxBodyBytes,
 				Sources:     cli.EnvVars("FEEDSCAN_MAX_BODY"),
 				Destination: &cfg.MaxBodyBytes,
 			},
 			&cli.DurationFlag{
 				Name:        "host-delay",
 				Usage:       "min delay between requests to same host",
-				Value:       500 * time.Millisecond,
+				Value:       scanner.DefaultHostDelay,
 				Sources:     cli.EnvVars("FEEDSCAN_HOST_DELAY"),
 				Destination: &cfg.HostDelay,
 			},
@@ -134,7 +134,7 @@ func Command() *cli.Command {
 			},
 			&cli.IntFlag{
 				Name:        "max-posts",
-				Usage:       "newest posts to keep per site for the posts list (0 = none)",
+				Usage:       "newest posts to save per site for posts --cached (0 = none)",
 				Value:       50,
 				Sources:     cli.EnvVars("FEEDSCAN_MAX_POSTS"),
 				Destination: &cfg.MaxPosts,

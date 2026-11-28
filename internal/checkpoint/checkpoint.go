@@ -160,6 +160,20 @@ func (c *Checkpoint) AllPosts() []Post {
 	return out
 }
 
+// FeedURLs returns the feed URL of every site a scan found a feed for, in no
+// particular order. The same feed may appear twice when two sites share it.
+func (c *Checkpoint) FeedURLs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, r := range c.Entries {
+		if r.FeedURL != "" {
+			out = append(out, r.FeedURL)
+		}
+	}
+	return out
+}
+
 // Mark stamps an entry's VisitedAt. Returns ErrUnknownURL if u isn't tracked.
 func (c *Checkpoint) Mark(u string, at time.Time) error {
 	c.mu.Lock()
