@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 )
@@ -305,18 +304,26 @@ func TestLoadCheckpointWithoutPosts(t *testing.T) {
 	}
 }
 
-func TestFeedURLs(t *testing.T) {
+func TestFeeds(t *testing.T) {
 	t.Parallel()
+	post := func(u string) Post { return Post{Title: "t", URL: u, Date: time.Now()} }
 	cp := New()
-	cp.Put(Result{URL: "https://a.example", Status: StatusActive, FeedURL: "https://a.example/feed"})
+	cp.Put(Result{URL: "https://a.example", Status: StatusActive, FeedURL: "https://a.example/feed", Posts: []Post{post("https://a.example/1")}})
 	// A feed that failed to parse at scan time may work today: status is no filter.
 	cp.Put(Result{URL: "https://b.example", Status: StatusError, FeedURL: "https://b.example/rss"})
 	cp.Put(Result{URL: "https://c.example", Status: StatusNoFeed})
+	// Two sites, one feed: their saved posts are pooled.
+	cp.Put(Result{URL: "https://d.example", Status: StatusStale, FeedURL: "https://shared.example/feed", Posts: []Post{post("https://d.example/1")}})
+	cp.Put(Result{URL: "https://e.example", Status: StatusStale, FeedURL: "https://shared.example/feed", Posts: []Post{post("https://e.example/1")}})
 
-	got := cp.FeedURLs()
-	sort.Strings(got)
-	want := []string{"https://a.example/feed", "https://b.example/rss"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("got %v, want %v", got, want)
+	got := cp.Feeds()
+	for feed, want := range map[string]int{"https://a.example/feed": 1, "https://b.example/rss": 0, "https://shared.example/feed": 2} {
+		posts, ok := got[feed]
+		if !ok || len(posts) != want {
+			t.Errorf("%s: present=%v with %d posts, want %d", feed, ok, len(posts), want)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("got %d feeds, want 3 (a site without a feed has no entry): %v", len(got), got)
 	}
 }

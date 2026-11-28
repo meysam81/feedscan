@@ -134,7 +134,7 @@ func Command() *cli.Command {
 			},
 			&cli.IntFlag{
 				Name:        "max-posts",
-				Usage:       "newest posts to save per site for posts --cached (0 = none)",
+				Usage:       "newest posts to save per site, listed by posts --cached until the site is first fetched (0 = none)",
 				Value:       50,
 				Sources:     cli.EnvVars("FEEDSCAN_MAX_POSTS"),
 				Destination: &cfg.MaxPosts,

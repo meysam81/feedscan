@@ -18,7 +18,7 @@ func TestRootListsPostsAndSubcommandsKeepTheirFlags(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.checkpoint.json")
 	now := time.Now()
 	cp := checkpoint.New()
-	cp.Put(checkpoint.Result{URL: "https://a.example", CheckedAt: &now, Posts: []checkpoint.Post{
+	cp.Put(checkpoint.Result{URL: "https://a.example", FeedURL: "https://a.example/feed", CheckedAt: &now, Posts: []checkpoint.Post{
 		{Title: "Newer", URL: "https://a.example/newer", Date: now.Add(-time.Hour)},
 		{Title: "Older", URL: "https://a.example/older", Date: now.Add(-48 * time.Hour)},
 	}})
@@ -29,7 +29,7 @@ func TestRootListsPostsAndSubcommandsKeepTheirFlags(t *testing.T) {
 	var out bytes.Buffer
 	root := newRoot()
 	root.Writer = &out
-	if err := root.Run(context.Background(), []string{"feedscan", "--cached", "--checkpoint", path, "-n", "1"}); err != nil {
+	if err := root.Run(context.Background(), []string{"feedscan", "--cached", "--cache-file", filepath.Join(t.TempDir(), "posts.json"), "--checkpoint", path, "-n", "1"}); err != nil {
 		t.Fatalf("bare feedscan with flags: %v", err)
 	}
 	if got := out.String(); !strings.Contains(got, "Newer") || strings.Contains(got, "Older") {

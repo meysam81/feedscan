@@ -9,29 +9,55 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"feedscan/internal/checkpoint"
+	"feedscan/internal/postcache"
 	"feedscan/internal/scanner"
 )
 
+// TestMain keeps every command built here away from the real posts cache,
+// including one a test forgets to give a --cache-file.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "feedscan-posts-test")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("FEEDSCAN_POSTS_CACHE", filepath.Join(dir, "posts.json")); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // writeCheckpoint saves a checkpoint with one site holding the given posts.
+// As in a real scan, only a site whose feed was found has posts.
 func writeCheckpoint(t *testing.T, path, site string, posts ...checkpoint.Post) {
 	t.Helper()
 	now := time.Now()
 	cp := checkpoint.New()
-	cp.Put(checkpoint.Result{URL: site, Status: checkpoint.StatusActive, CheckedAt: &now, Posts: posts})
+	r := checkpoint.Result{URL: site, Status: checkpoint.StatusNoFeed, CheckedAt: &now}
+	if len(posts) > 0 {
+		r.Status, r.FeedURL, r.Posts = checkpoint.StatusActive, site+"/feed", posts
+	}
+	cp.Put(r)
 	if err := cp.Save(path); err != nil {
 		t.Fatalf("save %s: %v", path, err)
 	}
 }
 
 // runArgs executes a fresh posts command and returns its stdout and stderr.
+// Each call starts with an empty posts cache unless args name a --cache-file.
 func runArgs(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	if !slices.Contains(args, "--cache-file") {
+		args = append([]string{"--cache-file", filepath.Join(t.TempDir(), "posts.json")}, args...)
+	}
 	var out, errOut bytes.Buffer
 	cmd := Command()
 	cmd.Writer = &out
@@ -40,7 +66,7 @@ func runArgs(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	return out.String(), errOut.String(), err
 }
 
-// runCached lists the posts saved in checkpoints (no network).
+// runCached lists without the network: cached posts, else those a scan saved.
 func runCached(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	out, _, err := runArgs(t, append([]string{"--cached"}, args...)...)
@@ -313,7 +339,7 @@ func TestLiveFiltersLikeCached(t *testing.T) {
 
 func TestLiveWithNoFeedsSaysSo(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.checkpoint.json")
-	writeCheckpoint(t, path, "https://a.example") // a site with no feed_url
+	writeCheckpoint(t, path, "https://a.example") // a site without a feed
 
 	out, stderr, err := runArgs(t, "--checkpoint", path, "--format", "json")
 	if err != nil {
@@ -352,7 +378,7 @@ func TestInterruptedLiveRunIsAnErrorWithNoList(t *testing.T) {
 	cmd := Command()
 	cmd.Writer = &out
 	cmd.ErrWriter = &bytes.Buffer{}
-	err := cmd.Run(ctx, []string{"posts", "--checkpoint", path})
+	err := cmd.Run(ctx, []string{"posts", "--checkpoint", path, "--cache-file", filepath.Join(t.TempDir(), "posts.json")})
 	if !errors.Is(err, context.Canceled) || out.Len() != 0 {
 		t.Errorf("want context.Canceled and no output, got err=%v out=%q", err, out.String())
 	}
@@ -410,5 +436,321 @@ func TestNetworkFlagsApply(t *testing.T) {
 	}
 	if got := peak.Load(); got != 1 {
 		t.Errorf("--concurrency 1: peak = %d, want 1", got)
+	}
+}
+
+// writeCache saves a posts cache holding the given feeds.
+func writeCache(t *testing.T, path string, feeds map[string]postcache.Feed) {
+	t.Helper()
+	if err := (&postcache.Cache{Feeds: feeds}).Save(path); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+}
+
+// cachedFeed is a cache entry fetched ago before now, holding one post.
+func cachedFeed(title string, ago time.Duration) postcache.Feed {
+	return postcache.Feed{
+		FetchedAt: time.Now().Add(-ago),
+		Posts:     []checkpoint.Post{{Title: title, URL: "https://cached.example/" + title, Date: time.Now().Add(-2 * time.Hour)}},
+	}
+}
+
+func TestCacheIsReusedUntilMaxAge(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "cache", "posts.json")
+	writeSite(t, cp, "https://alice.example", srv.URL+"/alice")
+	args := []string{"--checkpoint", cp, "--cache-file", cache}
+
+	first, stderr, err := runArgs(t, args...)
+	if err != nil || hits.Load() != 1 {
+		t.Fatalf("first run: err=%v hits=%d, want a fetch", err, hits.Load())
+	}
+	if strings.Contains(stderr, "posts as of") {
+		t.Errorf("a run that fetched needs no freshness line, got %q", stderr)
+	}
+
+	second, stderr, err := runArgs(t, args...)
+	if err != nil || hits.Load() != 1 {
+		t.Fatalf("second run: err=%v hits=%d, want no new request", err, hits.Load())
+	}
+	if second != first {
+		t.Errorf("cached list differs from the fetched one:\n%s\nvs\n%s", second, first)
+	}
+	if !strings.Contains(stderr, "posts as of 0m ago; --refresh to fetch now") {
+		t.Errorf("stderr must say the list is cached and how old, got %q", stderr)
+	}
+
+	if _, _, err := runArgs(t, append(args, "--refresh")...); err != nil || hits.Load() != 2 {
+		t.Errorf("--refresh: err=%v hits=%d, want 2", err, hits.Load())
+	}
+	if _, _, err := runArgs(t, append(args, "--max-age", "0")...); err != nil || hits.Load() != 3 {
+		t.Errorf("--max-age 0: err=%v hits=%d, want 3", err, hits.Load())
+	}
+	if _, _, err := runArgs(t, append(args, "--max-age", "1h")...); err != nil || hits.Load() != 3 {
+		t.Errorf("--max-age 1h right after a fetch: err=%v hits=%d, want 3", err, hits.Load())
+	}
+}
+
+func TestOnlyFeedsOlderThanMaxAgeAreFetched(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	a, b, c := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json"), filepath.Join(dir, "c.checkpoint.json")
+	writeSite(t, a, "https://alice.example", srv.URL+"/alice")
+	writeSite(t, b, "https://bob.example", srv.URL+"/bob")
+	writeSite(t, c, "https://carol.example", srv.URL+"/carol") // scanned later: not in the cache
+	cache := filepath.Join(dir, "posts.json")
+	writeCache(t, cache, map[string]postcache.Feed{
+		srv.URL + "/alice": cachedFeed("fresh-alice", time.Hour),
+		srv.URL + "/bob":   cachedFeed("stale-bob", 25*time.Hour),
+	})
+
+	out, stderr, err := runArgs(t, "--checkpoint", a, "--checkpoint", b, "--checkpoint", c, "--cache-file", cache)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("requests = %d, want 2 (bob is stale, carol is new, alice is fresh)", got)
+	}
+	for _, want := range []string{"fresh-alice", "live bob", "live carol"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "stale-bob") {
+		t.Errorf("a refetched feed must not keep its old posts:\n%s", out)
+	}
+	if !strings.Contains(stderr, "fetching 2 feeds") {
+		t.Errorf("stderr = %q, want the count of feeds actually fetched", stderr)
+	}
+}
+
+func TestFailedFeedKeepsItsCachedPostsAndIsNotRetriedAtOnce(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
+	writeSite(t, a, "https://alice.example", srv.URL+"/alice")
+	writeSite(t, b, "https://bob.example", srv.URL+"/down")
+	cache := filepath.Join(dir, "posts.json")
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/down": cachedFeed("bob-before-the-outage", 25*time.Hour)})
+	args := []string{"--checkpoint", a, "--checkpoint", b, "--cache-file", cache}
+
+	out, stderr, err := runArgs(t, args...)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "live alice") || !strings.Contains(out, "bob-before-the-outage") {
+		t.Errorf("want alice's live post and bob's cached one:\n%s", out)
+	}
+	if !strings.Contains(stderr, "1 of 2 feeds failed") {
+		t.Errorf("stderr = %q, want the failure count", stderr)
+	}
+
+	before := hits.Load()
+	if _, _, err := runArgs(t, args...); err != nil || hits.Load() != before {
+		t.Errorf("next run: err=%v, %d new requests; a feed that just failed waits for --max-age", err, hits.Load()-before)
+	}
+}
+
+func TestOfflineListsTheCacheAndLeavesItAlone(t *testing.T) {
+	srv, _ := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://bob.example", srv.URL+"/down")
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/down": cachedFeed("from-three-days-ago", 72*time.Hour)})
+	before, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache)
+	if err != nil {
+		t.Fatalf("offline with a cache must still list it: %v", err)
+	}
+	if !strings.Contains(out, "from-three-days-ago") {
+		t.Errorf("list lacks the cached post:\n%s", out)
+	}
+	if !strings.Contains(stderr, "all 1 feeds failed") || !strings.Contains(stderr, "3d ago") {
+		t.Errorf("stderr must say nothing was fetched and how old the list is, got %q", stderr)
+	}
+	// Otherwise coming back online would wait a day before trying again.
+	if after, _ := os.ReadFile(cache); !bytes.Equal(before, after) {
+		t.Error("a run where every feed failed must not rewrite the cache")
+	}
+}
+
+func TestCachedNeverFetches(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
+	writeSite(t, a, "https://alice.example", srv.URL+"/alice") // in the cache
+	writeSite(t, b, "https://bob.example", srv.URL+"/bob")     // never fetched
+	cache := filepath.Join(dir, "posts.json")
+	writeCache(t, cache, map[string]postcache.Feed{srv.URL + "/alice": cachedFeed("alice-from-last-week", 7*24*time.Hour)})
+	before, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, err := runArgs(t, "--cached", "--checkpoint", a, "--checkpoint", b, "--cache-file", cache)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("--cached made %d requests, want 0", got)
+	}
+	if !strings.Contains(out, "alice-from-last-week") || strings.Contains(out, "alice.example/saved") {
+		t.Errorf("a cached feed lists its cached posts, not the scan's:\n%s", out)
+	}
+	if !strings.Contains(out, "bob.example/saved") {
+		t.Errorf("a feed never fetched falls back to the posts its scan saved:\n%s", out)
+	}
+	if !strings.Contains(stderr, "posts as of 7d ago") {
+		t.Errorf("stderr = %q, want the age of the cache", stderr)
+	}
+	if after, _ := os.ReadFile(cache); !bytes.Equal(before, after) {
+		t.Error("--cached must not write the cache")
+	}
+}
+
+func TestUnchangedFeedKeepsItsPosts(t *testing.T) {
+	const etag = `"v1"`
+	var full, conditional atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			conditional.Add(1)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		full.Add(1)
+		w.Header().Set("ETag", etag)
+		fmt.Fprintf(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>`+
+			`<item><title>only post</title><link>/p</link><pubDate>%s</pubDate></item></channel></rss>`,
+			time.Now().Add(-time.Hour).UTC().Format(time.RFC1123Z))
+	}))
+	t.Cleanup(srv.Close)
+	trustTestServers(t, srv)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://alice.example", srv.URL+"/feed")
+	args := []string{"--checkpoint", cp, "--cache-file", cache, "--refresh"}
+
+	first, _, err := runArgs(t, args...)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second, stderr, err := runArgs(t, args...)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if full.Load() != 1 || conditional.Load() != 1 {
+		t.Errorf("full=%d conditional=%d, want 1 and 1 (the second fetch sends the stored ETag)", full.Load(), conditional.Load())
+	}
+	if second != first || !strings.Contains(second, "only post") {
+		t.Errorf("an unchanged feed must keep its posts:\n%s", second)
+	}
+	if strings.Contains(stderr, "failed") {
+		t.Errorf("not modified is not a failure, got %q", stderr)
+	}
+	// The 304 counted as a fetch: the feed is fresh again.
+	if _, _, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache); err != nil || conditional.Load() != 1 {
+		t.Errorf("after a 304 the feed must not be due: err=%v conditional=%d", err, conditional.Load())
+	}
+}
+
+func TestPerSiteCap(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		items := ""
+		for i := 1; i <= 5; i++ { // post 1 is the newest
+			items += fmt.Sprintf("<item><title>%s post %d</title><link>%s/%d</link><pubDate>%s</pubDate></item>",
+				r.URL.Path[1:], i, r.URL.Path, i, time.Now().Add(-time.Duration(i)*time.Hour).UTC().Format(time.RFC1123Z))
+		}
+		fmt.Fprint(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>`+items+`</channel></rss>`)
+	}))
+	t.Cleanup(srv.Close)
+	trustTestServers(t, srv)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.checkpoint.json"), filepath.Join(dir, "b.checkpoint.json")
+	writeSite(t, a, "https://busy.example", srv.URL+"/busy")
+	writeSite(t, b, "https://quiet.example", srv.URL+"/quiet")
+	args := []string{"--checkpoint", a, "--checkpoint", b}
+
+	for flags, want := range map[string]int{"": 6, "--per-site=1": 2, "--per-site=0": 10} {
+		out, _, err := runArgs(t, append(args, strings.Fields(flags)...)...)
+		if err != nil {
+			t.Fatalf("%q: %v", flags, err)
+		}
+		got := rows(t, out)
+		if len(got) != want {
+			t.Errorf("%q: %d rows, want %d:\n%s", flags, len(got), want, out)
+		}
+		if flags == "--per-site=1" && (!strings.Contains(out, "busy post 1") || !strings.Contains(out, "quiet post 1")) {
+			t.Errorf("the cap must keep each site's newest post:\n%s", out)
+		}
+	}
+	// The cap counts posts that survive the filters: excluding nothing here,
+	// but a limit below the cap still wins.
+	if out, _, err := runArgs(t, append(args, "-n", "4")...); err != nil || len(rows(t, out)) != 4 {
+		t.Errorf("-n 4: err=%v\n%s", err, out)
+	}
+}
+
+func TestCorruptCacheWarnsAndRefetches(t *testing.T) {
+	srv, hits := feedServer(t)
+	dir := t.TempDir()
+	cp, cache := filepath.Join(dir, "x.checkpoint.json"), filepath.Join(dir, "posts.json")
+	writeSite(t, cp, "https://alice.example", srv.URL+"/alice")
+	if err := os.WriteFile(cache, []byte("{half a file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache)
+	if err != nil || !strings.Contains(out, "live alice") || hits.Load() != 1 {
+		t.Fatalf("a broken cache must not stop the listing: err=%v hits=%d\n%s", err, hits.Load(), out)
+	}
+	if !strings.Contains(stderr, "posts cache unreadable") {
+		t.Errorf("stderr = %q, want a warning", stderr)
+	}
+	if _, _, err := runArgs(t, "--checkpoint", cp, "--cache-file", cache); err != nil || hits.Load() != 1 {
+		t.Errorf("the cache must have been rewritten whole: err=%v hits=%d", err, hits.Load())
+	}
+}
+
+func TestRejectsContradictoryOrNegativeCacheFlags(t *testing.T) {
+	for _, args := range [][]string{{"--cached", "--refresh"}, {"--per-site", "-1"}, {"--max-age", "-1s"}} {
+		if _, _, err := runArgs(t, append([]string{"--checkpoint", "x.json"}, args...)...); err == nil {
+			t.Errorf("%v: expected an error", args)
+		}
+	}
+}
+
+func TestProgress(t *testing.T) {
+	var plain bytes.Buffer
+	tick, done := progress(&plain, 3, false)
+	done()
+	if tick != nil || plain.String() != "fetching 3 feeds...\n" {
+		t.Errorf("off a terminal: want one line and no ticker, got tick set=%v %q", tick != nil, plain.String())
+	}
+
+	var term bytes.Buffer
+	tick, done = progress(&term, 2, true)
+	tick()
+	tick()
+	done()
+	if got, want := term.String(), "fetching feeds 0/2\rfetching feeds 1/2\rfetching feeds 2/2\n"; got != want {
+		t.Errorf("on a terminal: got %q, want %q", got, want)
+	}
+	if isTerminal(&term) {
+		t.Error("a buffer is not a terminal")
+	}
+}
+
+func TestAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		30 * time.Second: "0m", 59 * time.Minute: "59m", 3 * time.Hour: "3h", 47 * time.Hour: "47h", 72 * time.Hour: "3d",
+	} {
+		if got := age(d); got != want {
+			t.Errorf("age(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

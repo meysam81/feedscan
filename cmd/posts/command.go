@@ -2,10 +2,11 @@
 // the blog posts of the sites found by earlier scans. main also mounts its
 // flags and action on the root command, so a bare `feedscan` runs it.
 //
-// By default it fetches each site's feed (the feed_url a scan stored) and
-// lists what the feeds hold right now, so an old scan still gives a current
-// list. With --cached it lists the posts saved by the scan instead: no
-// network. Either way checkpoint files are only read, never written.
+// It lists what each site's feed (the feed_url a scan stored) holds, so an old
+// scan still gives a current list. Feeds are fetched at most once per
+// --max-age: what they held is remembered in a cache file, and a feed whose
+// copy is recent enough is not requested again. --refresh fetches everything
+// now; --cached never touches the network. Checkpoint files are only read.
 package posts
 
 import (
@@ -14,13 +15,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"feedscan/cmd/cliflags"
 	"feedscan/internal/checkpoint"
+	"feedscan/internal/postcache"
 	"feedscan/internal/report"
 	"feedscan/internal/scanner"
 )
@@ -45,7 +50,11 @@ func Command() *cli.Command {
 		format      string
 		limit       int
 		days        int
+		perSite     int
 		cached      bool
+		refresh     bool
+		maxAge      time.Duration
+		cacheFile   string
 		concurrency int
 		timeout     time.Duration
 	)
@@ -87,11 +96,41 @@ func Command() *cli.Command {
 				Destination: &exclude,
 				Local:       true,
 			},
+			&cli.IntFlag{
+				Name:        "per-site",
+				Usage:       "max posts per scanned site, so one busy site can't fill the list (0 = all)",
+				Value:       3,
+				Sources:     cli.EnvVars("FEEDSCAN_PER_SITE"),
+				Destination: &perSite,
+				Local:       true,
+			},
+			&cli.DurationFlag{
+				Name:        "max-age",
+				Usage:       "fetch a feed again once its cached copy is older than this (0 = always)",
+				Value:       24 * time.Hour,
+				Sources:     cli.EnvVars("FEEDSCAN_MAX_AGE"),
+				Destination: &maxAge,
+				Local:       true,
+			},
+			&cli.BoolFlag{
+				Name:        "refresh",
+				Usage:       "fetch every feed now, whatever the age of its cached copy",
+				Sources:     cli.EnvVars("FEEDSCAN_REFRESH"),
+				Destination: &refresh,
+				Local:       true,
+			},
 			&cli.BoolFlag{
 				Name:        "cached",
-				Usage:       "list the posts saved by the last scan instead of fetching the feeds (no network)",
+				Usage:       "never fetch: list cached posts whatever their age (no network)",
 				Sources:     cli.EnvVars("FEEDSCAN_CACHED"),
 				Destination: &cached,
+				Local:       true,
+			},
+			&cli.StringFlag{
+				Name:        "cache-file",
+				Usage:       "where fetched posts are remembered (default: feedscan/posts.json in the user cache directory)",
+				Sources:     cli.EnvVars("FEEDSCAN_POSTS_CACHE"),
+				Destination: &cacheFile,
 				Local:       true,
 			},
 			&cli.IntFlag{
@@ -116,12 +155,15 @@ func Command() *cli.Command {
 			if cmd.Args().Present() {
 				return fmt.Errorf("unknown command %q (see --help)", cmd.Args().First())
 			}
-			if limit < 0 || days < 0 {
-				return errors.New("--limit and --days must be >= 0")
+			if limit < 0 || days < 0 || perSite < 0 {
+				return errors.New("--limit, --days and --per-site must be >= 0")
+			}
+			if cached && refresh {
+				return errors.New("--cached and --refresh contradict each other; pick one")
 			}
 			// --cached makes no requests, so a bad FEEDSCAN_CONCURRENCY must not break it.
-			if !cached && (concurrency < 1 || timeout <= 0) {
-				return errors.New("--concurrency must be >= 1 and --timeout > 0")
+			if !cached && (concurrency < 1 || timeout <= 0 || maxAge < 0) {
+				return errors.New("--concurrency must be >= 1, --timeout > 0 and --max-age >= 0")
 			}
 			if len(paths) == 0 {
 				found, err := filepath.Glob(checkpointGlob)
@@ -135,11 +177,8 @@ func Command() *cli.Command {
 			}
 			stderr := cmd.Root().ErrWriter
 
-			var (
-				saved    []checkpoint.Post
-				feedURLs []string
-				seen     = make(map[string]struct{})
-			)
+			// One entry per feed, however many scans found it.
+			scanned := make(map[string][]checkpoint.Post)
 			for _, path := range paths {
 				cp, warn, err := checkpoint.Load(path)
 				if err != nil {
@@ -148,61 +187,174 @@ func Command() *cli.Command {
 				if warn != "" {
 					fmt.Fprintf(stderr, "warning: %s: %s\n", path, warn)
 				}
-				saved = append(saved, cp.AllPosts()...)
-				for _, u := range cp.FeedURLs() {
-					if _, dup := seen[u]; !dup { // one fetch per feed, however many scans found it
-						seen[u] = struct{}{}
-						feedURLs = append(feedURLs, u)
+				for feedURL, posts := range cp.Feeds() {
+					scanned[feedURL] = append(scanned[feedURL], posts...)
+				}
+			}
+			feedURLs := make([]string, 0, len(scanned))
+			for u := range scanned {
+				feedURLs = append(feedURLs, u)
+			}
+			sort.Strings(feedURLs)
+
+			if cacheFile == "" {
+				dir, err := os.UserCacheDir()
+				if err != nil {
+					return fmt.Errorf("no user cache directory (%w); pass --cache-file", err)
+				}
+				cacheFile = filepath.Join(dir, "feedscan", "posts.json")
+			}
+			cache, warn := postcache.Load(cacheFile)
+			if warn != "" {
+				fmt.Fprintf(stderr, "warning: %s: %s\n", cacheFile, warn)
+			}
+
+			now := time.Now()
+			var due []scanner.FeedRequest
+			if !cached {
+				for _, u := range feedURLs {
+					f, known := cache.Feeds[u]
+					if refresh || !known || now.Sub(f.FetchedAt) >= maxAge {
+						due = append(due, scanner.FeedRequest{URL: u, ETag: f.ETag, LastModified: f.LastModified})
+					}
+				}
+			}
+			offline := false
+			if len(due) > 0 {
+				results, err := fetchLive(ctx, stderr, due, concurrency, timeout)
+				if err != nil {
+					return err
+				}
+				failed := 0
+				for _, r := range results {
+					if r.Err != nil {
+						failed++
+					}
+				}
+				// Every feed failing is no network, not a thousand broken sites.
+				// The cache is left as it was, so the next run tries again at once.
+				if offline = failed == len(due); !offline {
+					for _, r := range results {
+						f := cache.Feeds[r.URL]
+						f.FetchedAt = now
+						if r.Err == nil && !r.NotModified {
+							f.Posts, f.ETag, f.LastModified = r.Posts, r.ETag, r.LastModified
+						}
+						// A failed feed keeps the posts of its last good fetch.
+						cache.Feeds[r.URL] = f
+					}
+					if err := cache.Save(cacheFile); err != nil {
+						fmt.Fprintf(stderr, "warning: posts cache not saved: %v\n", err)
+					}
+					if failed > 0 {
+						fmt.Fprintf(stderr, "%d of %d feeds failed\n", failed, len(due))
 					}
 				}
 			}
 
-			all := saved
-			if cached {
-				if len(all) == 0 {
-					fmt.Fprintln(stderr, "no posts saved yet; run `feedscan scan --url <page> --no-cache` to fetch them")
+			var (
+				all    []checkpoint.Post
+				have   int       // posts available before any filter
+				oldest time.Time // least recently fetched feed in the list
+			)
+			for _, u := range feedURLs {
+				f, known := cache.Feeds[u]
+				posts := f.Posts
+				switch {
+				case known:
+					if oldest.IsZero() || f.FetchedAt.Before(oldest) {
+						oldest = f.FetchedAt
+					}
+				case cached:
+					posts = scanned[u] // never fetched: what the scan saw is all there is
 				}
-			} else {
-				var err error
-				if all, err = fetchLive(ctx, stderr, feedURLs, concurrency, timeout); err != nil {
-					return err
-				}
+				have += len(posts)
+				// The per-site cap applies to what would be listed, hence after the filters.
+				all = append(all, report.SelectPosts(report.ExcludeHosts(posts, exclude), now, days, perSite)...)
 			}
 
-			selected := report.SelectPosts(report.ExcludeHosts(all, exclude), time.Now(), days, limit)
+			switch {
+			case len(feedURLs) == 0:
+				fmt.Fprintln(stderr, "no feeds found by earlier scans; run `feedscan scan --url <page>` to find some")
+			case offline && have == 0:
+				// An empty list would pass for "nothing new".
+				return fmt.Errorf("all %d feeds failed (offline?) and none of their posts are cached; --cached lists the posts saved by the last scan", len(due))
+			case offline:
+				fmt.Fprintf(stderr, "all %d feeds failed (offline?); listing cached posts, some from %s ago\n", len(due), age(now.Sub(oldest)))
+			case cached && have == 0:
+				fmt.Fprintln(stderr, "no posts cached yet; run `feedscan` without --cached to fetch them")
+			case len(due) == 0 && !oldest.IsZero():
+				fmt.Fprintf(stderr, "posts as of %s ago; --refresh to fetch now\n", age(now.Sub(oldest)))
+			}
+
+			selected := report.SelectPosts(all, now, days, limit)
 			return report.WritePosts(cmd.Root().Writer, format, selected)
 		},
 	}
 }
 
-// fetchLive fetches the current posts of feedURLs, reporting progress and
-// skipped feeds on stderr. A failed feed is skipped; an interrupted run, or
-// one where no feed could be fetched at all, is an error.
-func fetchLive(ctx context.Context, stderr io.Writer, feedURLs []string, concurrency int, timeout time.Duration) ([]checkpoint.Post, error) {
-	if len(feedURLs) == 0 {
-		fmt.Fprintln(stderr, "no feeds found by earlier scans; run `feedscan scan --url <page>` to find some")
-		return nil, nil
-	}
+// fetchLive fetches the feeds that are due, reporting progress on stderr.
+// Failed feeds are in the results; only an interrupted run is an error.
+func fetchLive(ctx context.Context, stderr io.Writer, due []scanner.FeedRequest, concurrency int, timeout time.Duration) ([]scanner.FeedResult, error) {
 	cfg := &scanner.Config{
 		Timeout:      timeout,
 		Concurrency:  concurrency,
 		UserAgent:    scanner.DefaultUserAgent,
 		MaxBodyBytes: scanner.DefaultMaxBodyBytes,
 		HostDelay:    scanner.DefaultHostDelay,
-		MaxPosts:     math.MaxInt, // nothing is saved, so no per-site cap; --limit caps the list
+		MaxPosts:     math.MaxInt, // --per-site and --limit cap the list, not the cache
 	}
-	fmt.Fprintf(stderr, "fetching %d feeds...\n", len(feedURLs))
-	posts, failed := scanner.FetchPosts(ctx, newHTTPClient(cfg), cfg, feedURLs)
+	tick, done := progress(stderr, len(due), isTerminal(stderr))
+	results := scanner.FetchFeeds(ctx, newHTTPClient(cfg), cfg, due, tick)
+	done()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Every feed failing is no network, not a thousand broken sites: an empty
-	// list would pass for "nothing new".
-	if failed == len(feedURLs) {
-		return nil, fmt.Errorf("all %d feeds failed (offline?); use --cached for the posts saved by the last scan", failed)
+	return results, nil
+}
+
+// progress reports a fetch of total feeds on w. On a terminal it is a counter
+// that tick advances in place and done ends; anywhere else (a pipe, a log) it
+// is one line up front, so nothing is rewritten in a file.
+func progress(w io.Writer, total int, terminal bool) (tick, done func()) {
+	if !terminal {
+		fmt.Fprintf(w, "fetching %d feeds...\n", total)
+		return nil, func() {}
 	}
-	if failed > 0 {
-		fmt.Fprintf(stderr, "%d of %d feeds failed\n", failed, len(feedURLs))
+	var (
+		mu sync.Mutex // tick is called from the fetching goroutines
+		n  int
+	)
+	fmt.Fprintf(w, "fetching feeds 0/%d", total)
+	tick = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		fmt.Fprintf(w, "\rfetching feeds %d/%d", n, total)
 	}
-	return posts, nil
+	return tick, func() { fmt.Fprintln(w) }
+}
+
+// isTerminal reports whether w is an interactive terminal.
+// ponytail: any character device counts, /dev/null included, where a
+// rewritten counter is as invisible as a line would be.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// age renders how long ago something was, coarsely: "5m", "3h", "2d".
+func age(d time.Duration) string {
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
