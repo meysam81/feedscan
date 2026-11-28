@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.5](https://github.com/meysam81/feedscan/compare/v0.0.4...v0.0.5) (2026-11-28)
+
+
+### Features
+
+* **posts:** cache the live list for a day ([#22](https://github.com/meysam81/feedscan/issues/22)) ([a7578e5](https://github.com/meysam81/feedscan/commit/a7578e5aae128dc06b112c93d9e03baf2e0ea7db))
+* **posts:** fetch feeds live by default, --cached for saved posts ([#20](https://github.com/meysam81/feedscan/issues/20)) ([b0cbe4b](https://github.com/meysam81/feedscan/commit/b0cbe4b8f5e94058aef925f474b85a45f5edd051))
+
 ## [0.0.4](https://github.com/meysam81/feedscan/compare/v0.0.3...v0.0.4) (2026-11-22)
 
 
